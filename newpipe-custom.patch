@@ -1,0 +1,375 @@
+From 40c565705df09b78b8425e24b20b2729d27ecdf6 Mon Sep 17 00:00:00 2001
+From: Custom <custom@local>
+Date: Wed, 28 Oct 2026 17:07:57 +0000
+Subject: [PATCH] YouTube-style look: dark #0F0F0F theme, card feed, bottom
+ tabs, rounded thumbnails, custom build workflow
+
+---
+ .github/workflows/build-custom-apk.yml        |  35 ++++++++++++++++++
+ app/build.gradle.kts                          |   2 +-
+ .../newpipe/fragments/MainFragment.java       |   4 +-
+ .../main/res/drawable/yt_duration_badge.xml   |   5 +++
+ .../res/layout-land/list_stream_card_item.xml |   5 ++-
+ .../main/res/layout/list_stream_card_item.xml |  11 +++---
+ app/src/main/res/values/colors.xml            |  20 +++++-----
+ app/src/main/res/values/settings_keys.xml     |   8 ++--
+ app/src/main/res/values/styles_services.xml   |   8 +++-
+ app/src/main/res/values/styles_yt.xml         |   9 +++++
+ app/src/main/res/xml/appearance_settings.xml  |   2 +-
+ signing/debug.keystore                        | Bin 0 -> 2666 bytes
+ 12 files changed, 82 insertions(+), 27 deletions(-)
+ create mode 100644 .github/workflows/build-custom-apk.yml
+ create mode 100644 app/src/main/res/drawable/yt_duration_badge.xml
+ create mode 100644 app/src/main/res/values/styles_yt.xml
+ create mode 100644 signing/debug.keystore
+
+diff --git a/.github/workflows/build-custom-apk.yml b/.github/workflows/build-custom-apk.yml
+new file mode 100644
+index 0000000..1e40ae5
+--- /dev/null
++++ b/.github/workflows/build-custom-apk.yml
+@@ -0,0 +1,35 @@
++name: "Build NewPipe Custom APK"
++
++on:
++  workflow_dispatch:
++  push:
++    branches: [ master ]
++
++jobs:
++  build:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v6
++        with:
++          fetch-depth: 0
++
++      - uses: actions/setup-java@v5
++        with:
++          distribution: 'temurin'
++          java-version: '21'
++          cache: 'gradle'
++
++      # Same signing key on every build, so new APKs install as updates
++      - name: "Install fixed signing key"
++        run: |
++          mkdir -p ~/.android
++          cp signing/debug.keystore ~/.android/debug.keystore
++
++      - name: "Build APK"
++        run: ./gradlew assembleContinuous --stacktrace
++
++      - name: "Upload APK"
++        uses: actions/upload-artifact@v7
++        with:
++          name: NewPipe-Custom
++          path: app/build/outputs/apk/continuous/*.apk
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 74e8ebd..a926ed7 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -91,7 +91,7 @@ configure<ApplicationExtension> {
+             // suffix the app id and the app name with git branch name
+             if (normalizedWorkingBranch.isEmpty() || workingBranch in defaultBranches) {
+                 applicationIdSuffix = ".continuous"
+-                resValue("string", "app_name", "NewPipe Continuous")
++                resValue("string", "app_name", "NewPipe Custom")
+             } else {
+                 applicationIdSuffix = ".continuous.$normalizedWorkingBranch"
+                 resValue("string", "app_name", "NewPipe $workingBranch")
+diff --git a/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
+index 1a5e5aa..a566cd5 100644
+--- a/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
++++ b/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
+@@ -90,7 +90,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+         youtubeRestrictedModeEnabledKey = getString(R.string.youtube_restricted_mode_enabled);
+         youtubeRestrictedModeEnabled = prefs.getBoolean(youtubeRestrictedModeEnabledKey, false);
+         mainTabsPositionKey = getString(R.string.main_tabs_position_key);
+-        mainTabsPositionBottom = prefs.getBoolean(mainTabsPositionKey, false);
++        mainTabsPositionBottom = prefs.getBoolean(mainTabsPositionKey, true);
+     }
+ 
+     @Override
+@@ -124,7 +124,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+             setupTabs();
+         }
+ 
+-        final boolean newMainTabsPosition = prefs.getBoolean(mainTabsPositionKey, false);
++        final boolean newMainTabsPosition = prefs.getBoolean(mainTabsPositionKey, true);
+         if (mainTabsPositionBottom != newMainTabsPosition) {
+             mainTabsPositionBottom = newMainTabsPosition;
+             updateTabLayoutPosition();
+diff --git a/app/src/main/res/drawable/yt_duration_badge.xml b/app/src/main/res/drawable/yt_duration_badge.xml
+new file mode 100644
+index 0000000..3bb3822
+--- /dev/null
++++ b/app/src/main/res/drawable/yt_duration_badge.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="@color/duration_background_color" />
++    <corners android:radius="4dp" />
++</shape>
+diff --git a/app/src/main/res/layout-land/list_stream_card_item.xml b/app/src/main/res/layout-land/list_stream_card_item.xml
+index 7939425..efef587 100644
+--- a/app/src/main/res/layout-land/list_stream_card_item.xml
++++ b/app/src/main/res/layout-land/list_stream_card_item.xml
+@@ -10,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="@dimen/video_item_search_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_search_thumbnail_image_height"
+         android:scaleType="fitCenter"
+@@ -26,7 +27,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
+         android:textAllCaps="true"
+diff --git a/app/src/main/res/layout/list_stream_card_item.xml b/app/src/main/res/layout/list_stream_card_item.xml
+index 968dca0..288cbe0 100644
+--- a/app/src/main/res/layout/list_stream_card_item.xml
++++ b/app/src/main/res/layout/list_stream_card_item.xml
+@@ -6,17 +6,18 @@
+     android:layout_width="match_parent"
+     android:layout_height="wrap_content"
+     android:paddingTop="@dimen/channel_item_grid_padding"
+-    android:paddingBottom="@dimen/channel_item_grid_padding"
++    android:paddingBottom="16dp"
+     android:background="?attr/selectableItemBackground"
+     android:clickable="true"
+     android:focusable="true">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="0dp"
+         android:layout_height="0dp"
+-        android:layout_marginStart="2dp"
+-        android:layout_marginEnd="2dp"
++        android:layout_marginStart="12dp"
++        android:layout_marginEnd="12dp"
+         android:scaleType="centerCrop"
+         android:src="@drawable/placeholder_thumbnail_video"
+         app:layout_constraintBottom_toTopOf="@+id/itemProgressView"
+@@ -31,7 +32,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
+         android:textAllCaps="true"
+diff --git a/app/src/main/res/values/colors.xml b/app/src/main/res/values/colors.xml
+index 73e8a0c..e5d9b46 100644
+--- a/app/src/main/res/values/colors.xml
++++ b/app/src/main/res/values/colors.xml
+@@ -10,8 +10,8 @@
+     <color name="placeholder_foreground">#6C6C6C</color>
+ 
+     <!-- Light Theme -->
+-    <color name="light_background_color">#EEEEEE</color>
+-    <color name="light_dialog_background_color">#EEEEEE</color>
++    <color name="light_background_color">#FFFFFF</color>
++    <color name="light_dialog_background_color">#FFFFFF</color>
+     <color name="light_settings_accent_color">#e53935</color>
+     <color name="light_separator_color">#32000000</color>
+     <color name="light_ripple_color">#48868686</color>
+@@ -20,24 +20,24 @@
+     <color name="light_shadow_start_color">#5a000000</color>
+     <color name="light_license_background_color">#ffffff</color>
+     <color name="light_license_text_color">#212121</color>
+-    <color name="light_card_item_background_color">#F8F8F8</color>
+-    <color name="light_card_item_contrast_color">#E9E9E9</color>
++    <color name="light_card_item_background_color">#FFFFFF</color>
++    <color name="light_card_item_contrast_color">#F2F2F2</color>
+     <color name="light_border_color">#33000000</color>
+ 
+     <!-- Dark Theme -->
+-    <color name="dark_background_color">#222222</color>
+-    <color name="dark_dialog_background_color">#424242</color>
++    <color name="dark_background_color">#0F0F0F</color>
++    <color name="dark_dialog_background_color">#212121</color>
+     <color name="dark_settings_accent_color">#ff5252</color>
+     <color name="dark_separator_color">#0affffff</color>
+     <color name="dark_ripple_color">#48ffffff</color>
+     <color name="dark_selected_color">#2affffff</color>
+-    <color name="dark_contrast_background_color">#1f717171</color>
++    <color name="dark_contrast_background_color">#1f3f3f3f</color>
+     <color name="dark_shadow_start_color">#82000000</color>
+     <color name="dark_license_background_color">#424242</color>
+     <color name="dark_license_text_color">#ffffff</color>
+     <color name="dark_queue_background_color">#af000000</color>
+-    <color name="dark_card_item_background_color">#313131</color>
+-    <color name="dark_card_item_contrast_color">#474747</color>
++    <color name="dark_card_item_background_color">#0F0F0F</color>
++    <color name="dark_card_item_contrast_color">#272727</color>
+     <color name="dark_border_color">#33FFFFFF</color>
+ 
+     <!-- Black Theme -->
+@@ -52,7 +52,7 @@
+     <!-- Miscellaneous -->
+     <color name="queue_background_color">@color/dark_queue_background_color</color>
+     <color name="drawer_header_font_color">#F2FFFFFF</color>
+-    <color name="duration_background_color">#aa000000</color>
++    <color name="duration_background_color">#CC000000</color>
+     <color name="live_duration_background_color">#c8E53935</color>
+     <color name="playlist_stream_count_background_color">#e6000000</color>
+     <color name="duration_text_color">#EEFFFFFF</color>
+diff --git a/app/src/main/res/values/settings_keys.xml b/app/src/main/res/values/settings_keys.xml
+index 60ac20d..60685c9 100644
+--- a/app/src/main/res/values/settings_keys.xml
++++ b/app/src/main/res/values/settings_keys.xml
+@@ -121,10 +121,10 @@
+     </string-array>
+ 
+     <string name="default_resolution_key">default_resolution</string>
+-    <string name="default_resolution_value">720p60</string>
++    <string name="default_resolution_value">1080p60</string>
+     <string name="show_higher_resolutions_key">show_higher_resolutions</string>
+     <string name="default_popup_resolution_key">default_popup_resolution</string>
+-    <string name="default_popup_resolution_value">480p</string>
++    <string name="default_popup_resolution_value">720p</string>
+     <string name="best_resolution_key">best_resolution</string>
+ 
+     <string-array name="high_resolution_list_values">
+@@ -257,7 +257,7 @@
+     <string name="dark_theme_key">dark_theme</string>
+     <string name="black_theme_key">black_theme</string>
+     <string name="auto_device_theme_key">auto_device_theme</string>
+-    <string name="default_theme_value">@string/auto_device_theme_key</string>
++    <string name="default_theme_value">@string/dark_theme_key</string>
+     <string name="default_night_theme_value">@string/dark_theme_key</string>
+     <string-array name="theme_values_list">
+         <item>@string/light_theme_key</item>
+@@ -1409,7 +1409,7 @@
+     </string-array>
+ 
+     <string name="list_view_mode_key">list_view_mode</string>
+-    <string name="list_view_mode_value">@string/list_view_mode_auto_key</string>
++    <string name="list_view_mode_value">@string/list_view_mode_card_key</string>
+ 
+     <!-- TODO: Use these across the app instead of hardcoding it -->
+     <string name="list_view_mode_auto_key">auto</string>
+diff --git a/app/src/main/res/values/styles_services.xml b/app/src/main/res/values/styles_services.xml
+index db1fba3..f1513b8 100644
+--- a/app/src/main/res/values/styles_services.xml
++++ b/app/src/main/res/values/styles_services.xml
+@@ -6,11 +6,15 @@
+     </style>
+ 
+     <style name="DarkTheme.YouTube" parent="DarkTheme" tools:keep="@style/DarkTheme_YouTube">
+-        <item name="colorPrimaryDark">@color/dark_youtube_primary_color</item>
++        <item name="colorPrimary">@color/yt_dark_toolbar_color</item>
++        <item name="colorPrimaryDark">@color/yt_dark_toolbar_color</item>
++        <item name="colorControlActivated">@color/dark_settings_accent_color</item>
+     </style>
+ 
+     <style name="BlackTheme.YouTube" parent="BlackTheme" tools:keep="@style/BlackTheme_YouTube">
+-        <item name="colorPrimaryDark">@color/dark_youtube_primary_color</item>
++        <item name="colorPrimary">@color/black</item>
++        <item name="colorPrimaryDark">@color/black</item>
++        <item name="colorControlActivated">@color/dark_settings_accent_color</item>
+     </style>
+ 
+     <!-- SoundCloud -->
+diff --git a/app/src/main/res/values/styles_yt.xml b/app/src/main/res/values/styles_yt.xml
+new file mode 100644
+index 0000000..31345f3
+--- /dev/null
++++ b/app/src/main/res/values/styles_yt.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources>
++    <color name="yt_dark_toolbar_color">#0F0F0F</color>
++
++    <style name="YtRoundedThumbnail">
++        <item name="cornerFamily">rounded</item>
++        <item name="cornerSize">12dp</item>
++    </style>
++</resources>
+diff --git a/app/src/main/res/xml/appearance_settings.xml b/app/src/main/res/xml/appearance_settings.xml
+index d8f6bf5..7d32232 100644
+--- a/app/src/main/res/xml/appearance_settings.xml
++++ b/app/src/main/res/xml/appearance_settings.xml
+@@ -59,7 +59,7 @@
+         app:iconSpaceReserved="false" />
+ 
+     <SwitchPreferenceCompat
+-        android:defaultValue="false"
++        android:defaultValue="true"
+         android:key="@string/main_tabs_position_key"
+         android:summary="@string/main_tabs_position_summary"
+         android:title="@string/main_tabs_position_title"
+diff --git a/signing/debug.keystore b/signing/debug.keystore
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8c59c500232babcee63048b4e7152aea149221e
+GIT binary patch
+literal 2666
+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
+
+literal 0
+HcmV?d00001
+
+-- 
+2.43.0
+
