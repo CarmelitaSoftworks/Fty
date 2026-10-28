@@ -3,6 +3,9 @@ name: "Build NewPipe Custom"
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,8 +31,20 @@ jobs:
         working-directory: np
         run: ./gradlew assembleContinuous --stacktrace
 
+      - name: "Rename APK"
+        run: mv np/app/build/outputs/apk/continuous/*.apk "NewPipe-Custom-${{ github.run_number }}.apk"
+
       - name: "Upload APK"
         uses: actions/upload-artifact@v7
         with:
           name: NewPipe-Custom
-          path: np/app/build/outputs/apk/continuous/*.apk
+          path: NewPipe-Custom-*.apk
+
+      - name: "Publish APK as a release (direct download)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" NewPipe-Custom-*.apk \
+            --repo "${{ github.repository }}" \
+            --title "NewPipe Custom build ${{ github.run_number }}" \
+            --notes "YouTube-style NewPipe v0.29.1 build."
