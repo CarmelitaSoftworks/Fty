@@ -40,7 +40,7 @@ index 0000000..1e40ae5
 +          name: NewPipe-Custom
 +          path: app/build/outputs/apk/continuous/*.apk
 diff --git a/app/build.gradle.kts b/app/build.gradle.kts
-index 74e8ebd..a926ed7 100644
+index 74e8ebd..2bfe4c5 100644
 --- a/app/build.gradle.kts
 +++ b/app/build.gradle.kts
 @@ -91,7 +91,7 @@ configure<ApplicationExtension> {
@@ -52,6 +52,14 @@ index 74e8ebd..a926ed7 100644
              } else {
                  applicationIdSuffix = ".continuous.$normalizedWorkingBranch"
                  resValue("string", "app_name", "NewPipe $workingBranch")
+@@ -250,6 +250,7 @@ dependencies {
+     implementation(libs.androidx.work.runtime)
+     implementation(libs.androidx.work.rxjava3)
+     implementation(libs.google.android.material)
++    implementation("com.google.android.gms:play-services-auth:21.2.0")
+     implementation(libs.androidx.webkit)
+ 
+     // Coroutines interop
 diff --git a/app/src/main/java/org/schabi/newpipe/custom/CustomFeatures.kt b/app/src/main/java/org/schabi/newpipe/custom/CustomFeatures.kt
 new file mode 100644
 index 0000000..21cde40
@@ -195,11 +203,127 @@ index 0000000..21cde40
 +        result as List<LongArray>
 +    }.subscribeOn(Schedulers.io())
 +}
+diff --git a/app/src/main/java/org/schabi/newpipe/custom/YouTubeAccount.kt b/app/src/main/java/org/schabi/newpipe/custom/YouTubeAccount.kt
+new file mode 100644
+index 0000000..ba4bfef
+--- /dev/null
++++ b/app/src/main/java/org/schabi/newpipe/custom/YouTubeAccount.kt
+@@ -0,0 +1,101 @@
++package org.schabi.newpipe.custom
++
++import android.app.Activity
++import android.app.PendingIntent
++import android.content.Intent
++import com.google.android.gms.auth.api.identity.AuthorizationRequest
++import com.google.android.gms.auth.api.identity.Identity
++import com.google.android.gms.common.api.Scope
++import io.reactivex.rxjava3.core.Completable
++import io.reactivex.rxjava3.schedulers.Schedulers
++import java.io.IOException
++import java.net.HttpURLConnection
++import java.net.URL
++import org.json.JSONObject
++
++/**
++ * Google sign-in through the official YouTube Data API (OAuth). Only an access token is
++ * received; the password never passes through the app.
++ */
++object YouTubeAccount {
++    private const val SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
++
++    fun interface Callback<T> {
++        fun onResult(value: T)
++    }
++
++    @JvmStatic
++    fun authorize(
++        activity: Activity,
++        onToken: Callback<String>,
++        onResolution: Callback<PendingIntent>,
++        onError: Callback<Exception>
++    ) {
++        val request = AuthorizationRequest.builder()
++            .setRequestedScopes(listOf(Scope(SCOPE)))
++            .build()
++        Identity.getAuthorizationClient(activity).authorize(request)
++            .addOnSuccessListener { result ->
++                val pendingIntent = result.pendingIntent
++                val token = result.accessToken
++                if (result.hasResolution() && pendingIntent != null) {
++                    onResolution.onResult(pendingIntent)
++                } else if (token != null) {
++                    onToken.onResult(token)
++                } else {
++                    onError.onResult(IllegalStateException("No access token"))
++                }
++            }
++            .addOnFailureListener { e -> onError.onResult(e) }
++    }
++
++    @JvmStatic
++    fun tokenFromIntent(activity: Activity, data: Intent?): String? {
++        if (data == null) return null
++        return try {
++            Identity.getAuthorizationClient(activity)
++                .getAuthorizationResultFromIntent(data).accessToken
++        } catch (e: Exception) {
++            null
++        }
++    }
++
++    @JvmStatic
++    fun postComment(token: String, videoId: String, text: String): Completable =
++        Completable.fromAction {
++            val body = JSONObject().put(
++                "snippet",
++                JSONObject()
++                    .put("videoId", videoId)
++                    .put(
++                        "topLevelComment",
++                        JSONObject().put("snippet", JSONObject().put("textOriginal", text))
++                    )
++            ).toString()
++            val connection = URL(
++                "https://www.googleapis.com/youtube/v3/commentThreads?part=snippet"
++            ).openConnection() as HttpURLConnection
++            try {
++                connection.requestMethod = "POST"
++                connection.doOutput = true
++                connection.connectTimeout = 10000
++                connection.readTimeout = 10000
++                connection.setRequestProperty("Authorization", "Bearer $token")
++                connection.setRequestProperty("Content-Type", "application/json; charset=UTF-8")
++                connection.outputStream.use { it.write(body.toByteArray()) }
++                val code = connection.responseCode
++                if (code !in 200..299) {
++                    val error = connection.errorStream?.bufferedReader()?.use { it.readText() }
++                    throw IOException("YouTube ($code): " + parseError(error))
++                }
++            } finally {
++                connection.disconnect()
++            }
++        }.subscribeOn(Schedulers.io())
++
++    private fun parseError(body: String?): String = try {
++        JSONObject(body ?: "").getJSONObject("error").getString("message")
++    } catch (e: Exception) {
++        body?.take(200) ?: "unknown error"
++    }
++}
 diff --git a/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
-index 1a5e5aa..a566cd5 100644
+index 1a5e5aa..ee046cf 100644
 --- a/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
 +++ b/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
-@@ -90,7 +90,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+@@ -12,6 +12,8 @@ import android.content.SharedPreferences;
+ import android.content.res.ColorStateList;
+ import android.graphics.Color;
+ import android.os.Bundle;
++import android.widget.TextView;
++import android.widget.LinearLayout;
+ import android.util.Log;
+ import android.view.LayoutInflater;
+ import android.view.Menu;
+@@ -90,7 +92,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
          youtubeRestrictedModeEnabledKey = getString(R.string.youtube_restricted_mode_enabled);
          youtubeRestrictedModeEnabled = prefs.getBoolean(youtubeRestrictedModeEnabledKey, false);
          mainTabsPositionKey = getString(R.string.main_tabs_position_key);
@@ -208,7 +332,41 @@ index 1a5e5aa..a566cd5 100644
      }
  
      @Override
-@@ -124,7 +124,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+@@ -110,9 +112,33 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+         binding.mainTabLayout.addOnTabSelectedListener(this);
+ 
+         setupTabs();
++        setupHomeChips();
+         updateTabLayoutPosition();
+     }
+ 
++    private void setupHomeChips() {
++        final LinearLayout container = binding.getRoot().findViewById(R.id.main_chips_container);
++        if (container == null) {
++            return;
++        }
++        container.removeAllViews();
++        for (final String chip : getResources().getStringArray(R.array.custom_home_chips)) {
++            final TextView chipView = (TextView) getLayoutInflater()
++                    .inflate(R.layout.custom_chip, container, false);
++            chipView.setText(chip);
++            chipView.setOnClickListener(v -> NavigationHelper.openSearchFragment(getFM(),
++                    org.schabi.newpipe.extractor.ServiceList.YouTube.getServiceId(), chip));
++            container.addView(chipView);
++        }
++    }
++
++    private void updateHomeChipsVisibility(final int position) {
++        final View chips = binding.getRoot().findViewById(R.id.main_chips_scroll);
++        if (chips != null) {
++            chips.setVisibility(position == 0 ? View.VISIBLE : View.GONE);
++        }
++    }
++
+     @Override
+     public void onResume() {
+         super.onResume();
+@@ -124,7 +150,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
              setupTabs();
          }
  
@@ -217,11 +375,53 @@ index 1a5e5aa..a566cd5 100644
          if (mainTabsPositionBottom != newMainTabsPosition) {
              mainTabsPositionBottom = newMainTabsPosition;
              updateTabLayoutPosition();
+@@ -240,6 +266,21 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+         tabLayout.setSelectedTabIndicatorGravity(
+                 bottom ? INDICATOR_GRAVITY_TOP : INDICATOR_GRAVITY_BOTTOM);
+ 
++        final View chips = binding.getRoot().findViewById(R.id.main_chips_scroll);
++        if (chips != null) {
++            final var chipParams = (RelativeLayout.LayoutParams) chips.getLayoutParams();
++            chipParams.removeRule(ALIGN_PARENT_TOP);
++            chipParams.removeRule(BELOW);
++            if (bottom) {
++                chipParams.addRule(ALIGN_PARENT_TOP);
++            } else {
++                chipParams.addRule(BELOW, R.id.main_tab_layout);
++            }
++            chips.setLayoutParams(chipParams);
++            pagerParams.removeRule(BELOW);
++            pagerParams.addRule(BELOW, R.id.main_chips_scroll);
++        }
++
+         tabLayout.setLayoutParams(tabParams);
+         viewPager.setLayoutParams(pagerParams);
+ 
+@@ -262,6 +303,7 @@ public class MainFragment extends BaseFragment implements TabLayout.OnTabSelecte
+             Log.d(TAG, "onTabSelected() called with: selectedTab = [" + selectedTab + "]");
+         }
+         updateTitleForTab(selectedTab.getPosition());
++        updateHomeChipsVisibility(selectedTab.getPosition());
+     }
+ 
+     @Override
 diff --git a/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java
-index ee93e31..22fd625 100644
+index ee93e31..de458d4 100644
 --- a/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java
 +++ b/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java
-@@ -131,6 +131,9 @@ import java.util.function.Consumer;
+@@ -41,6 +41,11 @@ import android.view.ViewTreeObserver;
+ import android.view.WindowManager;
+ import android.view.animation.DecelerateInterpolator;
+ import android.widget.FrameLayout;
++import android.widget.EditText;
++import androidx.activity.result.ActivityResultLauncher;
++import androidx.activity.result.IntentSenderRequest;
++import androidx.activity.result.contract.ActivityResultContracts;
++import org.schabi.newpipe.custom.YouTubeAccount;
+ import android.widget.RelativeLayout;
+ import android.widget.Toast;
+ 
+@@ -131,6 +136,9 @@ import java.util.function.Consumer;
  
  import coil3.util.CoilUtils;
  import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
@@ -231,7 +431,37 @@ index ee93e31..22fd625 100644
  import io.reactivex.rxjava3.disposables.CompositeDisposable;
  import io.reactivex.rxjava3.disposables.Disposable;
  import io.reactivex.rxjava3.schedulers.Schedulers;
-@@ -1586,16 +1589,15 @@ public final class VideoDetailFragment
+@@ -225,6 +233,21 @@ public final class VideoDetailFragment
+ 
+     private FragmentVideoDetailBinding binding;
+ 
++    private String pendingComment;
++    private String pendingCommentVideoId;
++    private final ActivityResultLauncher<IntentSenderRequest> youtubeAuthLauncher =
++            registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(),
++                    result -> {
++                        final String token = YouTubeAccount.tokenFromIntent(requireActivity(),
++                                result.getData());
++                        if (token == null) {
++                            Toast.makeText(requireContext(), R.string.custom_login_failed,
++                                    Toast.LENGTH_LONG).show();
++                        } else if (pendingComment != null) {
++                            sendComment(token);
++                        }
++                    });
++
+     private TabAdapter pageAdapter;
+ 
+     private ContentObserver settingsContentObserver;
+@@ -503,6 +526,7 @@ public final class VideoDetailFragment
+                         dialog -> dialog.show(getParentFragmentManager(), TAG)));
+             }
+         }));
++        binding.detailControlsComment.setOnClickListener(v -> showCommentDialog());
+         binding.detailControlsDownload.setOnClickListener(v -> {
+             if (PermissionHelper.checkStoragePermissions(activity,
+                     PermissionHelper.DOWNLOAD_DIALOG_REQUEST_CODE)) {
+@@ -1586,16 +1610,15 @@ public final class VideoDetailFragment
              }
              binding.detailThumbsDisabledView.setVisibility(View.GONE);
          }
@@ -251,7 +481,7 @@ index ee93e31..22fd625 100644
              animate(binding.detailDurationView, true, 100);
          } else {
              binding.detailDurationView.setVisibility(View.GONE);
-@@ -2518,4 +2520,26 @@ public final class VideoDetailFragment
+@@ -2518,4 +2541,93 @@ public final class VideoDetailFragment
              lastStableBottomSheetState = newState;
          }
      }
@@ -276,6 +506,73 @@ index ee93e31..22fd625 100644
 +                    binding.detailThumbsUpImgView.setVisibility(View.VISIBLE);
 +                    binding.detailThumbsDisabledView.setVisibility(View.GONE);
 +                }, error -> Log.w(TAG, "Return YouTube Dislike failed", error)));
++    }
++
++    private void showCommentDialog() {
++        if (currentInfo == null
++                || currentInfo.getServiceId() != ServiceList.YouTube.getServiceId()) {
++            Toast.makeText(requireContext(), R.string.custom_comment_only_youtube,
++                    Toast.LENGTH_SHORT).show();
++            return;
++        }
++        final EditText input = new EditText(requireContext());
++        input.setHint(R.string.custom_comment_hint);
++        input.setMinLines(2);
++        final FrameLayout container = new FrameLayout(requireContext());
++        final int padding = (int) (20 * getResources().getDisplayMetrics().density);
++        container.setPadding(padding, padding / 2, padding, 0);
++        container.addView(input);
++        final String videoId = currentInfo.getId();
++
++        new AlertDialog.Builder(requireContext())
++                .setTitle(R.string.custom_comment_title)
++                .setView(container)
++                .setNegativeButton(android.R.string.cancel, null)
++                .setPositiveButton(R.string.custom_comment_send, (dialog, which) -> {
++                    final String text = input.getText().toString().trim();
++                    if (text.isEmpty()) {
++                        return;
++                    }
++                    pendingComment = text;
++                    pendingCommentVideoId = videoId;
++                    YouTubeAccount.authorize(requireActivity(),
++                            token -> sendComment(token),
++                            pendingIntent -> youtubeAuthLauncher.launch(
++                                    new IntentSenderRequest.Builder(
++                                            pendingIntent.getIntentSender()).build()),
++                            error -> {
++                                Log.w(TAG, "Google sign-in failed", error);
++                                if (getContext() != null) {
++                                    Toast.makeText(getContext(), getString(
++                                            R.string.custom_login_failed) + "\n"
++                                            + error.getMessage(), Toast.LENGTH_LONG).show();
++                                }
++                            });
++                })
++                .show();
++    }
++
++    private void sendComment(final String token) {
++        final String text = pendingComment;
++        final String videoId = pendingCommentVideoId;
++        pendingComment = null;
++        if (text == null || videoId == null) {
++            return;
++        }
++        disposables.add(YouTubeAccount.postComment(token, videoId, text)
++                .observeOn(AndroidSchedulers.mainThread())
++                .subscribe(() -> {
++                    if (getContext() != null) {
++                        Toast.makeText(getContext(), R.string.custom_comment_posted,
++                                Toast.LENGTH_SHORT).show();
++                    }
++                }, error -> {
++                    Log.w(TAG, "Posting comment failed", error);
++                    if (getContext() != null) {
++                        Toast.makeText(getContext(), getString(R.string.custom_comment_failed)
++                                + "\n" + error.getMessage(), Toast.LENGTH_LONG).show();
++                    }
++                }));
 +    }
  }
 diff --git a/app/src/main/java/org/schabi/newpipe/fragments/list/channel/ChannelFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/list/channel/ChannelFragment.java
@@ -533,6 +830,21 @@ index 0000000..e050f3b
 +        android:strokeColor="#FFFFFF"
 +        android:fillColor="#FFFFFF" />
 +</vector>
+diff --git a/app/src/main/res/drawable/yt_chip.xml b/app/src/main/res/drawable/yt_chip.xml
+new file mode 100644
+index 0000000..9db9fe3
+--- /dev/null
++++ b/app/src/main/res/drawable/yt_chip.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="#33888888">
++    <item>
++        <shape android:shape="rectangle">
++            <solid android:color="#2E888888" />
++            <corners android:radius="18dp" />
++        </shape>
++    </item>
++</ripple>
 diff --git a/app/src/main/res/drawable/yt_duration_badge.xml b/app/src/main/res/drawable/yt_duration_badge.xml
 new file mode 100644
 index 0000000..3bb3822
@@ -598,6 +910,321 @@ index 7939425..5806869 100644
          android:layout_width="0dp"
          android:layout_height="wrap_content"
          android:layout_marginStart="@dimen/video_item_search_image_right_margin"
+diff --git a/app/src/main/res/layout-large-land/fragment_video_detail.xml b/app/src/main/res/layout-large-land/fragment_video_detail.xml
+index d186810..f780a82 100644
+--- a/app/src/main/res/layout-large-land/fragment_video_detail.xml
++++ b/app/src/main/res/layout-large-land/fragment_video_detail.xml
+@@ -181,6 +181,7 @@
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_video_title_view"
++                        android:fontFamily="sans-serif-medium"
+                             android:layout_width="match_parent"
+                             android:layout_height="match_parent"
+                             android:layout_marginEnd="30dp"
+@@ -412,160 +413,206 @@
+                             </RelativeLayout>
+                         </RelativeLayout>
+ 
++                        <HorizontalScrollView
++                            android:layout_width="match_parent"
++                            android:layout_height="wrap_content"
++                            android:layout_marginTop="8dp"
++                            android:layout_marginBottom="6dp"
++                            android:clipToPadding="false"
++                            android:paddingHorizontal="12dp"
++                            android:scrollbars="none">
++
++                        <LinearLayout
++                            android:layout_width="wrap_content"
++                            android:layout_height="wrap_content"
++                            android:orientation="horizontal">
+                         <!-- CONTROLS -->
+                         <LinearLayout
+                             android:id="@+id/detail_control_panel"
+-                            android:layout_width="match_parent"
++                            android:layout_width="wrap_content"
+                             android:layout_height="wrap_content"
+                             android:descendantFocusability="afterDescendants"
+                             android:focusable="true"
+-                            android:orientation="horizontal"
+-                            android:padding="@dimen/detail_control_padding">
++                            android:orientation="horizontal">
++
++                            <org.schabi.newpipe.views.NewPipeTextView
++                                android:id="@+id/detail_controls_comment"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:layout_gravity="center_vertical"
++                                android:background="@drawable/yt_chip"
++                                android:clickable="true"
++                                android:focusable="true"
++                                android:drawableStart="@drawable/ic_comment"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
++                                android:text="@string/custom_comment_chip"
++                                android:textSize="14sp" />
++
++                            <org.schabi.newpipe.views.NewPipeTextView
++                                android:id="@+id/detail_controls_share"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
++                                android:layout_gravity="center_vertical"
++                                android:background="@drawable/yt_chip"
++                                android:clickable="true"
++                                android:contentDescription="@string/share"
++                                android:drawableStart="@drawable/ic_share"
++                                android:focusable="true"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
++                                android:text="@string/share"
++                                android:textSize="14sp" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_playlist_append"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/add_to_playlist"
+-                                android:drawableTop="@drawable/ic_playlist_add"
++                                android:drawableStart="@drawable/ic_playlist_add"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/controls_add_to_playlist_title"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_background"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/play_audio"
+-                                android:drawableTop="@drawable/ic_headset"
++                                android:drawableStart="@drawable/ic_headset"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/controls_background_title"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_popup"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/open_in_popup_mode"
+-                                android:drawableTop="@drawable/ic_picture_in_picture"
++                                android:drawableStart="@drawable/ic_picture_in_picture"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/controls_popup_title"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_download"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/controls_download_desc"
+-                                android:drawableTop="@drawable/ic_file_download"
++                                android:drawableStart="@drawable/ic_file_download"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/download"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                         </LinearLayout>
+ 
+                         <!-- SECONDARY CONTROLS -->
+                         <LinearLayout
+                             android:id="@+id/detail_secondary_control_panel"
+-                            android:layout_width="match_parent"
++                            android:layout_width="wrap_content"
+                             android:layout_height="wrap_content"
+                             android:descendantFocusability="afterDescendants"
+                             android:focusable="true"
+                             android:orientation="horizontal"
+-                            android:paddingHorizontal="@dimen/detail_control_padding"
+-                            android:paddingBottom="@dimen/detail_control_padding"
+                             android:visibility="gone"
+                             tools:visibility="visible">
+ 
+-                            <org.schabi.newpipe.views.NewPipeTextView
+-                                android:id="@+id/detail_controls_share"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
+-                                android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
+-                                android:clickable="true"
+-                                android:contentDescription="@string/share"
+-                                android:drawableTop="@drawable/ic_share"
+-                                android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
+-                                android:text="@string/share"
+-                                android:textSize="@dimen/detail_control_text_size" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_open_in_browser"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/open_in_browser"
+-                                android:drawableTop="@drawable/ic_language"
++                                android:drawableStart="@drawable/ic_language"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/open_in_browser"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_play_with_kodi"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/play_with_kodi_title"
+-                                android:drawableTop="@drawable/ic_cast"
++                                android:drawableStart="@drawable/ic_cast"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/play_with_kodi_title"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                             <org.schabi.newpipe.views.NewPipeTextView
+                                 android:id="@+id/detail_controls_crash_the_player"
+-                                android:layout_width="@dimen/detail_control_width"
+-                                android:layout_height="@dimen/detail_control_height"
++                                android:layout_width="wrap_content"
++                                android:layout_height="36dp"
++                                android:layout_marginEnd="8dp"
++                                android:drawablePadding="6dp"
++                                android:fontFamily="sans-serif-medium"
+                                 android:layout_gravity="center_vertical"
+-                                android:layout_weight="1"
+-                                android:background="?attr/selectableItemBackgroundBorderless"
++                                android:background="@drawable/yt_chip"
+                                 android:clickable="true"
+                                 android:contentDescription="@string/crash_the_player"
+-                                android:drawableTop="@drawable/ic_bug_report"
++                                android:drawableStart="@drawable/ic_bug_report"
+                                 android:focusable="true"
+-                                android:gravity="center"
+-                                android:paddingVertical="@dimen/detail_control_padding"
++                                android:gravity="center_vertical"
++                                android:paddingHorizontal="14dp"
+                                 android:text="@string/crash_the_player"
+-                                android:textSize="@dimen/detail_control_text_size" />
++                                android:textSize="14sp" />
+ 
+                         </LinearLayout>
++                        </LinearLayout>
++                        </HorizontalScrollView>
+ 
+                         <View
+                             android:id="@+id/detail_meta_info_separator"
+diff --git a/app/src/main/res/layout/custom_chip.xml b/app/src/main/res/layout/custom_chip.xml
+new file mode 100644
+index 0000000..b1c97c1
+--- /dev/null
++++ b/app/src/main/res/layout/custom_chip.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<TextView xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="wrap_content"
++    android:layout_height="32dp"
++    android:layout_marginEnd="8dp"
++    android:background="@drawable/yt_chip"
++    android:clickable="true"
++    android:focusable="true"
++    android:fontFamily="sans-serif-medium"
++    android:gravity="center"
++    android:paddingHorizontal="12dp"
++    android:textColor="?android:textColorPrimary"
++    android:textSize="14sp" />
 diff --git a/app/src/main/res/layout/fragment_channel.xml b/app/src/main/res/layout/fragment_channel.xml
 index f557e33..3a0d863 100644
 --- a/app/src/main/res/layout/fragment_channel.xml
@@ -618,6 +1245,331 @@ index f557e33..3a0d863 100644
                      android:text="@string/subscribe_button_title"
                      android:textSize="@dimen/channel_rss_title_size"
                      app:layout_constraintBottom_toBottomOf="parent"
+diff --git a/app/src/main/res/layout/fragment_main.xml b/app/src/main/res/layout/fragment_main.xml
+index ef25f8a..adc0afa 100644
+--- a/app/src/main/res/layout/fragment_main.xml
++++ b/app/src/main/res/layout/fragment_main.xml
+@@ -17,10 +17,27 @@
+         app:tabGravity="fill"
+         app:tabMinWidth="60dp" />
+ 
++    <HorizontalScrollView
++        android:id="@+id/main_chips_scroll"
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_below="@id/main_tab_layout"
++        android:clipToPadding="false"
++        android:paddingHorizontal="12dp"
++        android:paddingVertical="8dp"
++        android:scrollbars="none">
++
++        <LinearLayout
++            android:id="@+id/main_chips_container"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:orientation="horizontal" />
++    </HorizontalScrollView>
++
+     <androidx.viewpager.widget.ViewPager
+         android:id="@+id/pager"
+         android:layout_width="match_parent"
+         android:layout_height="match_parent"
+-        android:layout_below="@id/main_tab_layout" />
++        android:layout_below="@id/main_chips_scroll" />
+ 
+ </RelativeLayout>
+diff --git a/app/src/main/res/layout/fragment_video_detail.xml b/app/src/main/res/layout/fragment_video_detail.xml
+index 1a47115..c60d3c4 100644
+--- a/app/src/main/res/layout/fragment_video_detail.xml
++++ b/app/src/main/res/layout/fragment_video_detail.xml
+@@ -169,6 +169,7 @@
+ 
+                     <org.schabi.newpipe.views.NewPipeTextView
+                         android:id="@+id/detail_video_title_view"
++                        android:fontFamily="sans-serif-medium"
+                         android:layout_width="match_parent"
+                         android:layout_height="match_parent"
+                         android:layout_marginEnd="30dp"
+@@ -399,156 +400,202 @@
+                         </RelativeLayout>
+                     </RelativeLayout>
+ 
++                    <HorizontalScrollView
++                        android:layout_width="match_parent"
++                        android:layout_height="wrap_content"
++                        android:layout_marginTop="8dp"
++                        android:layout_marginBottom="6dp"
++                        android:clipToPadding="false"
++                        android:paddingHorizontal="12dp"
++                        android:scrollbars="none">
++
++                    <LinearLayout
++                        android:layout_width="wrap_content"
++                        android:layout_height="wrap_content"
++                        android:orientation="horizontal">
+                     <!-- CONTROLS -->
+                     <LinearLayout
+                         android:id="@+id/detail_control_panel"
+-                        android:layout_width="match_parent"
++                        android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+-                        android:orientation="horizontal"
+-                        android:padding="@dimen/detail_control_padding">
++                        android:orientation="horizontal">
++
++                        <org.schabi.newpipe.views.NewPipeTextView
++                            android:id="@+id/detail_controls_comment"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:layout_gravity="center_vertical"
++                            android:background="@drawable/yt_chip"
++                            android:clickable="true"
++                            android:focusable="true"
++                            android:drawableStart="@drawable/ic_comment"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
++                            android:text="@string/custom_comment_chip"
++                            android:textSize="14sp" />
++
++                        <org.schabi.newpipe.views.NewPipeTextView
++                            android:id="@+id/detail_controls_share"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
++                            android:layout_gravity="center_vertical"
++                            android:background="@drawable/yt_chip"
++                            android:clickable="true"
++                            android:contentDescription="@string/share"
++                            android:drawableStart="@drawable/ic_share"
++                            android:focusable="true"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
++                            android:text="@string/share"
++                            android:textSize="14sp" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_playlist_append"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/add_to_playlist"
+-                            android:drawableTop="@drawable/ic_playlist_add"
++                            android:drawableStart="@drawable/ic_playlist_add"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/controls_add_to_playlist_title"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_background"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/play_audio"
+-                            android:drawableTop="@drawable/ic_headset"
++                            android:drawableStart="@drawable/ic_headset"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/controls_background_title"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_popup"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/open_in_popup_mode"
+-                            android:drawableTop="@drawable/ic_picture_in_picture"
++                            android:drawableStart="@drawable/ic_picture_in_picture"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/controls_popup_title"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_download"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/controls_download_desc"
+-                            android:drawableTop="@drawable/ic_file_download"
++                            android:drawableStart="@drawable/ic_file_download"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/download"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                     </LinearLayout>
+ 
+                     <!-- SECONDARY CONTROLS -->
+                     <LinearLayout
+                         android:id="@+id/detail_secondary_control_panel"
+-                        android:layout_width="match_parent"
++                        android:layout_width="wrap_content"
+                         android:layout_height="wrap_content"
+                         android:orientation="horizontal"
+-                        android:paddingHorizontal="@dimen/detail_control_padding"
+-                        android:paddingBottom="@dimen/detail_control_padding"
+                         android:visibility="gone"
+                         tools:visibility="visible">
+ 
+-                        <org.schabi.newpipe.views.NewPipeTextView
+-                            android:id="@+id/detail_controls_share"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
+-                            android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
+-                            android:clickable="true"
+-                            android:contentDescription="@string/share"
+-                            android:drawableTop="@drawable/ic_share"
+-                            android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
+-                            android:text="@string/share"
+-                            android:textSize="@dimen/detail_control_text_size" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_open_in_browser"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/open_in_browser"
+-                            android:drawableTop="@drawable/ic_language"
++                            android:drawableStart="@drawable/ic_language"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/open_in_browser"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_play_with_kodi"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/play_with_kodi_title"
+-                            android:drawableTop="@drawable/ic_cast"
++                            android:drawableStart="@drawable/ic_cast"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/play_with_kodi_title"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                         <org.schabi.newpipe.views.NewPipeTextView
+                             android:id="@+id/detail_controls_crash_the_player"
+-                            android:layout_width="@dimen/detail_control_width"
+-                            android:layout_height="@dimen/detail_control_height"
++                            android:layout_width="wrap_content"
++                            android:layout_height="36dp"
++                            android:layout_marginEnd="8dp"
++                            android:drawablePadding="6dp"
++                            android:fontFamily="sans-serif-medium"
+                             android:layout_gravity="center_vertical"
+-                            android:layout_weight="1"
+-                            android:background="?attr/selectableItemBackgroundBorderless"
++                            android:background="@drawable/yt_chip"
+                             android:clickable="true"
+                             android:contentDescription="@string/crash_the_player"
+-                            android:drawableTop="@drawable/ic_bug_report"
++                            android:drawableStart="@drawable/ic_bug_report"
+                             android:focusable="true"
+-                            android:gravity="center"
+-                            android:paddingVertical="@dimen/detail_control_padding"
++                            android:gravity="center_vertical"
++                            android:paddingHorizontal="14dp"
+                             android:text="@string/crash_the_player"
+-                            android:textSize="@dimen/detail_control_text_size" />
++                            android:textSize="14sp" />
+ 
+                     </LinearLayout>
++                    </LinearLayout>
++                    </HorizontalScrollView>
+ 
+                     <View
+                         android:id="@+id/detail_meta_info_separator"
 diff --git a/app/src/main/res/layout/list_stream_card_item.xml b/app/src/main/res/layout/list_stream_card_item.xml
 index 968dca0..b416b48 100644
 --- a/app/src/main/res/layout/list_stream_card_item.xml
@@ -965,10 +1917,10 @@ index 60ac20d..60685c9 100644
      <string name="list_view_mode_auto_key">auto</string>
 diff --git a/app/src/main/res/values/strings_custom.xml b/app/src/main/res/values/strings_custom.xml
 new file mode 100644
-index 0000000..5ef0f46
+index 0000000..796f206
 --- /dev/null
 +++ b/app/src/main/res/values/strings_custom.xml
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,28 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
 +    <string name="custom_extras_category">Extras (NewPipe Custom)</string>
@@ -977,6 +1929,25 @@ index 0000000..5ef0f46
 +    <string name="custom_sponsorblock_skipped">Patrocinio omitido</string>
 +    <string name="custom_ryd_title">Return YouTube Dislike</string>
 +    <string name="custom_ryd_summary">Mostrar el número de "no me gusta" (estimado)</string>
++    <string name="custom_comment_chip">Comentar</string>
++    <string name="custom_comment_title">Escribe un comentario</string>
++    <string name="custom_comment_hint">Agrega un comentario público…</string>
++    <string name="custom_comment_send">Publicar</string>
++    <string name="custom_comment_posted">Comentario publicado</string>
++    <string name="custom_comment_failed">No se pudo publicar el comentario</string>
++    <string name="custom_comment_only_youtube">Solo se puede comentar en videos de YouTube</string>
++    <string name="custom_login_failed">No se pudo iniciar sesión con Google</string>
++    <string-array name="custom_home_chips">
++        <item>Música</item>
++        <item>Videojuegos</item>
++        <item>En vivo</item>
++        <item>Noticias</item>
++        <item>Deportes</item>
++        <item>Podcasts</item>
++        <item>Tecnología</item>
++        <item>Cocina</item>
++        <item>Tráilers</item>
++    </string-array>
 +</resources>
 diff --git a/app/src/main/res/values/styles_services.xml b/app/src/main/res/values/styles_services.xml
 index db1fba3..f1513b8 100644
