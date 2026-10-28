@@ -1,28 +1,3 @@
-From 40c565705df09b78b8425e24b20b2729d27ecdf6 Mon Sep 17 00:00:00 2001
-From: Custom <custom@local>
-Date: Wed, 28 Oct 2026 17:07:57 +0000
-Subject: [PATCH 1/2] YouTube-style look: dark #0F0F0F theme, card feed, bottom
- tabs, rounded thumbnails, custom build workflow
-
----
- .github/workflows/build-custom-apk.yml        |  35 ++++++++++++++++++
- app/build.gradle.kts                          |   2 +-
- .../newpipe/fragments/MainFragment.java       |   4 +-
- .../main/res/drawable/yt_duration_badge.xml   |   5 +++
- .../res/layout-land/list_stream_card_item.xml |   5 ++-
- .../main/res/layout/list_stream_card_item.xml |  11 +++---
- app/src/main/res/values/colors.xml            |  20 +++++-----
- app/src/main/res/values/settings_keys.xml     |   8 ++--
- app/src/main/res/values/styles_services.xml   |   8 +++-
- app/src/main/res/values/styles_yt.xml         |   9 +++++
- app/src/main/res/xml/appearance_settings.xml  |   2 +-
- signing/debug.keystore                        | Bin 0 -> 2666 bytes
- 12 files changed, 82 insertions(+), 27 deletions(-)
- create mode 100644 .github/workflows/build-custom-apk.yml
- create mode 100644 app/src/main/res/drawable/yt_duration_badge.xml
- create mode 100644 app/src/main/res/values/styles_yt.xml
- create mode 100644 signing/debug.keystore
-
 diff --git a/.github/workflows/build-custom-apk.yml b/.github/workflows/build-custom-apk.yml
 new file mode 100644
 index 0000000..1e40ae5
@@ -77,6 +52,149 @@ index 74e8ebd..a926ed7 100644
              } else {
                  applicationIdSuffix = ".continuous.$normalizedWorkingBranch"
                  resValue("string", "app_name", "NewPipe $workingBranch")
+diff --git a/app/src/main/java/org/schabi/newpipe/custom/CustomFeatures.kt b/app/src/main/java/org/schabi/newpipe/custom/CustomFeatures.kt
+new file mode 100644
+index 0000000..21cde40
+--- /dev/null
++++ b/app/src/main/java/org/schabi/newpipe/custom/CustomFeatures.kt
+@@ -0,0 +1,137 @@
++package org.schabi.newpipe.custom
++
++import android.content.Context
++import android.view.View
++import android.widget.ImageView
++import androidx.preference.PreferenceManager
++import io.reactivex.rxjava3.core.Single
++import io.reactivex.rxjava3.schedulers.Schedulers
++import java.net.HttpURLConnection
++import java.net.URL
++import java.net.URLEncoder
++import java.security.MessageDigest
++import java.util.concurrent.ConcurrentHashMap
++import org.json.JSONArray
++import org.json.JSONObject
++import org.schabi.newpipe.NewPipeDatabase
++import org.schabi.newpipe.R
++import org.schabi.newpipe.extractor.Image
++import org.schabi.newpipe.util.image.CoilHelper
++
++/**
++ * Extras of "NewPipe Custom": channel avatars in lists, Return YouTube Dislike and SponsorBlock.
++ */
++object CustomFeatures {
++    private const val SPONSORBLOCK_KEY = "custom_sponsorblock"
++    private const val RYD_KEY = "custom_return_dislike"
++    private const val USER_AGENT = "NewPipeCustom/1.0"
++
++    // ---------------- Channel avatars ----------------
++    private val avatars = ConcurrentHashMap<String, String>()
++
++    @Volatile
++    private var avatarLoadStarted = false
++
++    private fun ensureAvatarCache(context: Context) {
++        if (avatarLoadStarted) return
++        avatarLoadStarted = true
++        NewPipeDatabase.getInstance(context.applicationContext).subscriptionDAO().getAll()
++            .subscribeOn(Schedulers.io())
++            .subscribe({ list ->
++                for (sub in list) {
++                    val url = sub.url
++                    val avatar = sub.avatarUrl
++                    if (url != null && avatar != null) {
++                        avatars[url] = avatar
++                    }
++                }
++            }, { avatarLoadStarted = false })
++    }
++
++    /** Shows the uploader avatar next to the title, if the layout has a place for it. */
++    @JvmStatic
++    fun bindUploaderAvatar(root: View, images: List<Image>?, uploaderUrl: String?) {
++        val avatarView = root.findViewById<ImageView>(R.id.itemUploaderAvatarView) ?: return
++        ensureAvatarCache(root.context)
++        if (!images.isNullOrEmpty()) {
++            avatarView.visibility = View.VISIBLE
++            CoilHelper.loadAvatar(avatarView, images)
++            return
++        }
++        val cached = uploaderUrl?.let { avatars[it] }
++        if (cached != null) {
++            avatarView.visibility = View.VISIBLE
++            CoilHelper.loadAvatar(avatarView, cached)
++        } else {
++            avatarView.visibility = View.GONE
++        }
++    }
++
++    // ---------------- Settings ----------------
++    @JvmStatic
++    fun isSponsorBlockEnabled(context: Context): Boolean =
++        PreferenceManager.getDefaultSharedPreferences(context).getBoolean(SPONSORBLOCK_KEY, true)
++
++    @JvmStatic
++    fun isReturnDislikeEnabled(context: Context): Boolean =
++        PreferenceManager.getDefaultSharedPreferences(context).getBoolean(RYD_KEY, true)
++
++    private fun httpGet(url: String): String? {
++        val connection = URL(url).openConnection() as HttpURLConnection
++        connection.connectTimeout = 7000
++        connection.readTimeout = 7000
++        connection.setRequestProperty("User-Agent", USER_AGENT)
++        return try {
++            if (connection.responseCode != 200) null
++            else connection.inputStream.bufferedReader().use { it.readText() }
++        } finally {
++            connection.disconnect()
++        }
++    }
++
++    // ---------------- Return YouTube Dislike ----------------
++    @JvmStatic
++    fun fetchDislikes(videoId: String): Single<Long> = Single.fromCallable {
++        val body = httpGet(
++            "https://returnyoutubedislikeapi.com/votes?videoId=" +
++                URLEncoder.encode(videoId, "UTF-8")
++        ) ?: throw IllegalStateException("No dislike data")
++        JSONObject(body).getLong("dislikes")
++    }.subscribeOn(Schedulers.io())
++
++    // ---------------- SponsorBlock ----------------
++    private fun sha256Hex(text: String): String =
++        MessageDigest.getInstance("SHA-256").digest(text.toByteArray())
++            .joinToString("") { "%02x".format(it) }
++
++    /**
++     * Segments to skip, as [startMillis, endMillis]. Uses the hash-prefix API, so the
++     * exact video being watched is not sent to the SponsorBlock server.
++     */
++    @JvmStatic
++    fun fetchSponsorSegments(videoId: String): Single<List<LongArray>> = Single.fromCallable {
++        val categories = URLEncoder.encode(
++            "[\"sponsor\",\"selfpromo\",\"interaction\"]", "UTF-8"
++        )
++        val body = httpGet(
++            "https://sponsor.ajay.app/api/skipSegments/" + sha256Hex(videoId).substring(0, 4) +
++                "?categories=" + categories + "&actionType=skip"
++        ) ?: return@fromCallable emptyList<LongArray>()
++
++        val result = ArrayList<LongArray>()
++        val videos = JSONArray(body)
++        for (i in 0 until videos.length()) {
++            val video = videos.getJSONObject(i)
++            if (video.optString("videoID") != videoId) continue
++            val segments = video.optJSONArray("segments") ?: continue
++            for (j in 0 until segments.length()) {
++                val range = segments.getJSONObject(j).optJSONArray("segment") ?: continue
++                val start = (range.getDouble(0) * 1000).toLong()
++                val end = (range.getDouble(1) * 1000).toLong()
++                if (end - start > 1000) result.add(longArrayOf(start, end))
++            }
++        }
++        result.sortBy { it[0] }
++        result as List<LongArray>
++    }.subscribeOn(Schedulers.io())
++}
 diff --git a/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
 index 1a5e5aa..a566cd5 100644
 --- a/app/src/main/java/org/schabi/newpipe/fragments/MainFragment.java
@@ -99,6 +217,322 @@ index 1a5e5aa..a566cd5 100644
          if (mainTabsPositionBottom != newMainTabsPosition) {
              mainTabsPositionBottom = newMainTabsPosition;
              updateTabLayoutPosition();
+diff --git a/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java
+index ee93e31..22fd625 100644
+--- a/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java
++++ b/app/src/main/java/org/schabi/newpipe/fragments/detail/VideoDetailFragment.java
+@@ -131,6 +131,9 @@ import java.util.function.Consumer;
+ 
+ import coil3.util.CoilUtils;
+ import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
++
++import org.schabi.newpipe.custom.CustomFeatures;
++import org.schabi.newpipe.extractor.ServiceList;
+ import io.reactivex.rxjava3.disposables.CompositeDisposable;
+ import io.reactivex.rxjava3.disposables.Disposable;
+ import io.reactivex.rxjava3.schedulers.Schedulers;
+@@ -1586,16 +1589,15 @@ public final class VideoDetailFragment
+             }
+             binding.detailThumbsDisabledView.setVisibility(View.GONE);
+         }
++        loadReturnYouTubeDislike(info);
+ 
+         if (info.getDuration() > 0) {
+             binding.detailDurationView.setText(Localization.getDurationString(info.getDuration()));
+-            binding.detailDurationView.setBackgroundColor(
+-                    ContextCompat.getColor(activity, R.color.duration_background_color));
++            binding.detailDurationView.setBackgroundResource(R.drawable.yt_duration_badge);
+             animate(binding.detailDurationView, true, 100);
+         } else if (info.getStreamType() == StreamType.LIVE_STREAM) {
+             binding.detailDurationView.setText(R.string.duration_live);
+-            binding.detailDurationView.setBackgroundColor(
+-                    ContextCompat.getColor(activity, R.color.live_duration_background_color));
++            binding.detailDurationView.setBackgroundResource(R.drawable.yt_live_duration_badge);
+             animate(binding.detailDurationView, true, 100);
+         } else {
+             binding.detailDurationView.setVisibility(View.GONE);
+@@ -2518,4 +2520,26 @@ public final class VideoDetailFragment
+             lastStableBottomSheetState = newState;
+         }
+     }
++
++    private void loadReturnYouTubeDislike(@NonNull final StreamInfo info) {
++        if (info.getServiceId() != ServiceList.YouTube.getServiceId()
++                || !CustomFeatures.isReturnDislikeEnabled(activity)) {
++            return;
++        }
++        final String url = info.getUrl();
++        disposables.add(CustomFeatures.fetchDislikes(info.getId())
++                .observeOn(AndroidSchedulers.mainThread())
++                .subscribe(dislikes -> {
++                    if (binding == null || currentInfo == null
++                            || !url.equals(currentInfo.getUrl())) {
++                        return;
++                    }
++                    binding.detailThumbsDownCountView.setText(
++                            Localization.shortCount(activity, dislikes));
++                    binding.detailThumbsDownCountView.setVisibility(View.VISIBLE);
++                    binding.detailThumbsDownImgView.setVisibility(View.VISIBLE);
++                    binding.detailThumbsUpImgView.setVisibility(View.VISIBLE);
++                    binding.detailThumbsDisabledView.setVisibility(View.GONE);
++                }, error -> Log.w(TAG, "Return YouTube Dislike failed", error)));
++    }
+ }
+diff --git a/app/src/main/java/org/schabi/newpipe/fragments/list/channel/ChannelFragment.java b/app/src/main/java/org/schabi/newpipe/fragments/list/channel/ChannelFragment.java
+index 97481f2..c210554 100644
+--- a/app/src/main/java/org/schabi/newpipe/fragments/list/channel/ChannelFragment.java
++++ b/app/src/main/java/org/schabi/newpipe/fragments/list/channel/ChannelFragment.java
+@@ -386,12 +386,15 @@ public class ChannelFragment extends BaseStateFragment<ChannelInfo>
+         final int backgroundDuration = isButtonVisible ? 300 : 0;
+         final int textDuration = isButtonVisible ? 200 : 0;
+ 
++        // YouTube style: light "Subscribe" pill, dark grey "Subscribed" pill
+         final int subscribedBackground = ContextCompat
+-                .getColor(activity, R.color.subscribed_background_color);
+-        final int subscribedText = ContextCompat.getColor(activity, R.color.subscribed_text_color);
+-        final int subscribeBackground = ColorUtils.blendARGB(ThemeHelper
+-                .resolveColorFromAttr(activity, R.attr.colorPrimary), subscribedBackground, 0.35f);
+-        final int subscribeText = ContextCompat.getColor(activity, R.color.subscribe_text_color);
++                .getColor(activity, R.color.yt_subscribed_background_color);
++        final int subscribedText = ContextCompat
++                .getColor(activity, R.color.yt_subscribed_text_color);
++        final int subscribeBackground = ContextCompat
++                .getColor(activity, R.color.yt_subscribe_background_color);
++        final int subscribeText = ContextCompat
++                .getColor(activity, R.color.yt_subscribe_text_color);
+ 
+         if (isSubscribed) {
+             binding.channelSubscribeButton.setText(R.string.subscribed_button_title);
+diff --git a/app/src/main/java/org/schabi/newpipe/info_list/holder/StreamMiniInfoItemHolder.java b/app/src/main/java/org/schabi/newpipe/info_list/holder/StreamMiniInfoItemHolder.java
+index 32fa8bf..fd68668 100644
+--- a/app/src/main/java/org/schabi/newpipe/info_list/holder/StreamMiniInfoItemHolder.java
++++ b/app/src/main/java/org/schabi/newpipe/info_list/holder/StreamMiniInfoItemHolder.java
+@@ -57,8 +57,7 @@ public class StreamMiniInfoItemHolder extends InfoItemHolder {
+ 
+         if (item.getDuration() > 0) {
+             itemDurationView.setText(Localization.getDurationString(item.getDuration()));
+-            itemDurationView.setBackgroundColor(ContextCompat.getColor(itemBuilder.getContext(),
+-                    R.color.duration_background_color));
++            itemDurationView.setBackgroundResource(R.drawable.yt_duration_badge);
+             itemDurationView.setVisibility(View.VISIBLE);
+ 
+             StreamStateEntity state2 = null;
+@@ -77,8 +76,7 @@ public class StreamMiniInfoItemHolder extends InfoItemHolder {
+             }
+         } else if (StreamTypeUtil.isLiveStream(item.getStreamType())) {
+             itemDurationView.setText(R.string.duration_live);
+-            itemDurationView.setBackgroundColor(ContextCompat.getColor(itemBuilder.getContext(),
+-                    R.color.live_duration_background_color));
++            itemDurationView.setBackgroundResource(R.drawable.yt_live_duration_badge);
+             itemDurationView.setVisibility(View.VISIBLE);
+             itemProgressView.setVisibility(View.GONE);
+         } else {
+@@ -88,6 +86,8 @@ public class StreamMiniInfoItemHolder extends InfoItemHolder {
+ 
+         // Default thumbnail is shown on error, while loading and if the url is empty
+         CoilHelper.INSTANCE.loadThumbnail(itemThumbnailView, item.getThumbnails());
++        org.schabi.newpipe.custom.CustomFeatures.bindUploaderAvatar(itemView,
++                item.getUploaderAvatars(), item.getUploaderUrl());
+ 
+         itemView.setOnClickListener(view -> {
+             if (itemBuilder.getOnStreamSelectedListener() != null) {
+diff --git a/app/src/main/java/org/schabi/newpipe/local/feed/item/StreamItem.kt b/app/src/main/java/org/schabi/newpipe/local/feed/item/StreamItem.kt
+index 258a67a..8138ca1 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/feed/item/StreamItem.kt
++++ b/app/src/main/java/org/schabi/newpipe/local/feed/item/StreamItem.kt
+@@ -71,12 +71,7 @@ data class StreamItem(
+ 
+         if (stream.duration > 0) {
+             viewBinding.itemDurationView.text = Localization.getDurationString(stream.duration)
+-            viewBinding.itemDurationView.setBackgroundColor(
+-                ContextCompat.getColor(
+-                    viewBinding.itemDurationView.context,
+-                    R.color.duration_background_color
+-                )
+-            )
++            viewBinding.itemDurationView.setBackgroundResource(R.drawable.yt_duration_badge)
+             viewBinding.itemDurationView.visibility = View.VISIBLE
+ 
+             if (stateProgressTime != null) {
+@@ -88,12 +83,7 @@ data class StreamItem(
+             }
+         } else if (StreamTypeUtil.isLiveStream(stream.streamType)) {
+             viewBinding.itemDurationView.setText(R.string.duration_live)
+-            viewBinding.itemDurationView.setBackgroundColor(
+-                ContextCompat.getColor(
+-                    viewBinding.itemDurationView.context,
+-                    R.color.live_duration_background_color
+-                )
+-            )
++            viewBinding.itemDurationView.setBackgroundResource(R.drawable.yt_live_duration_badge)
+             viewBinding.itemDurationView.visibility = View.VISIBLE
+             viewBinding.itemProgressView.visibility = View.GONE
+         } else {
+@@ -102,6 +92,7 @@ data class StreamItem(
+         }
+ 
+         CoilHelper.loadThumbnail(viewBinding.itemThumbnailView, stream.thumbnailUrl)
++        org.schabi.newpipe.custom.CustomFeatures.bindUploaderAvatar(viewBinding.root, null, stream.uploaderUrl)
+ 
+         if (itemVersion != ItemVersion.MINI) {
+             viewBinding.itemAdditionalDetails.text =
+diff --git a/app/src/main/java/org/schabi/newpipe/local/holder/LocalPlaylistStreamItemHolder.java b/app/src/main/java/org/schabi/newpipe/local/holder/LocalPlaylistStreamItemHolder.java
+index 7dc71bf..da24081 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/holder/LocalPlaylistStreamItemHolder.java
++++ b/app/src/main/java/org/schabi/newpipe/local/holder/LocalPlaylistStreamItemHolder.java
+@@ -65,8 +65,7 @@ public class LocalPlaylistStreamItemHolder extends LocalItemHolder {
+         if (item.getStreamEntity().getDuration() > 0) {
+             itemDurationView.setText(Localization
+                     .getDurationString(item.getStreamEntity().getDuration()));
+-            itemDurationView.setBackgroundColor(ContextCompat.getColor(itemBuilder.getContext(),
+-                    R.color.duration_background_color));
++            itemDurationView.setBackgroundResource(R.drawable.yt_duration_badge);
+             itemDurationView.setVisibility(View.VISIBLE);
+ 
+             if (DependentPreferenceHelper.getPositionsInListsEnabled(itemProgressView.getContext())
+diff --git a/app/src/main/java/org/schabi/newpipe/local/holder/LocalStatisticStreamItemHolder.java b/app/src/main/java/org/schabi/newpipe/local/holder/LocalStatisticStreamItemHolder.java
+index f26a76a..296665e 100644
+--- a/app/src/main/java/org/schabi/newpipe/local/holder/LocalStatisticStreamItemHolder.java
++++ b/app/src/main/java/org/schabi/newpipe/local/holder/LocalStatisticStreamItemHolder.java
+@@ -94,8 +94,7 @@ public class LocalStatisticStreamItemHolder extends LocalItemHolder {
+         if (item.getStreamEntity().getDuration() > 0) {
+             itemDurationView.
+                     setText(Localization.getDurationString(item.getStreamEntity().getDuration()));
+-            itemDurationView.setBackgroundColor(ContextCompat.getColor(itemBuilder.getContext(),
+-                    R.color.duration_background_color));
++            itemDurationView.setBackgroundResource(R.drawable.yt_duration_badge);
+             itemDurationView.setVisibility(View.VISIBLE);
+ 
+             if (DependentPreferenceHelper.getPositionsInListsEnabled(itemProgressView.getContext())
+diff --git a/app/src/main/java/org/schabi/newpipe/player/Player.java b/app/src/main/java/org/schabi/newpipe/player/Player.java
+index e458b70..ba1cc59 100644
+--- a/app/src/main/java/org/schabi/newpipe/player/Player.java
++++ b/app/src/main/java/org/schabi/newpipe/player/Player.java
+@@ -58,6 +58,7 @@ import android.media.AudioManager;
+ import android.support.v4.media.session.MediaSessionCompat;
+ import android.util.Log;
+ import android.view.LayoutInflater;
++import android.widget.Toast;
+ 
+ import androidx.annotation.NonNull;
+ import androidx.annotation.Nullable;
+@@ -127,6 +128,7 @@ import org.schabi.newpipe.util.SerializedCache;
+ import org.schabi.newpipe.util.StreamTypeUtil;
+ import org.schabi.newpipe.util.image.CoilHelper;
+ 
++import java.util.Collections;
+ import java.util.List;
+ import java.util.Objects;
+ import java.util.Optional;
+@@ -139,6 +141,8 @@ import io.reactivex.rxjava3.core.Single;
+ import io.reactivex.rxjava3.disposables.CompositeDisposable;
+ import io.reactivex.rxjava3.disposables.Disposable;
+ import io.reactivex.rxjava3.disposables.SerialDisposable;
++
++import org.schabi.newpipe.custom.CustomFeatures;
+ import io.reactivex.rxjava3.schedulers.Schedulers;
+ 
+ public final class Player implements PlaybackListener, Listener {
+@@ -197,6 +201,8 @@ public final class Player implements PlaybackListener, Listener {
+     private PlayQueueItem currentItem;
+     @Nullable
+     private MediaItemTag currentMetadata;
++    private final SerialDisposable sponsorBlockDisposable = new SerialDisposable();
++    private List<long[]> sponsorSegments = Collections.emptyList();
+     @Nullable
+     private Bitmap currentThumbnail;
+     @Nullable
+@@ -695,6 +701,7 @@ public final class Player implements PlaybackListener, Listener {
+         unregisterBroadcastReceiver();
+ 
+         databaseUpdateDisposable.clear();
++        sponsorBlockDisposable.dispose();
+         progressUpdateDisposable.set(null);
+         streamItemDisposable.clear();
+ 
+@@ -1017,11 +1024,44 @@ public final class Player implements PlaybackListener, Listener {
+         if (exoPlayerIsNull()) {
+             return;
+         }
++        skipSponsorSegmentIfNeeded();
+ 
+         onUpdateProgress(Math.max((int) simpleExoPlayer.getCurrentPosition(), 0),
+                 (int) simpleExoPlayer.getDuration(), simpleExoPlayer.getBufferedPercentage());
+     }
+ 
++    private void loadSponsorSegments(@NonNull final StreamInfo info) {
++        sponsorSegments = Collections.emptyList();
++        if (info.getServiceId() != YouTube.getServiceId()
++                || !CustomFeatures.isSponsorBlockEnabled(context)) {
++            sponsorBlockDisposable.set(null);
++            return;
++        }
++        final String url = info.getUrl();
++        sponsorBlockDisposable.set(CustomFeatures.fetchSponsorSegments(info.getId())
++                .observeOn(AndroidSchedulers.mainThread())
++                .subscribe(segments -> {
++                    if (currentMetadata != null && url.equals(currentMetadata.getStreamUrl())) {
++                        sponsorSegments = segments;
++                    }
++                }, error -> Log.w(TAG, "SponsorBlock: could not load segments", error)));
++    }
++
++    private void skipSponsorSegmentIfNeeded() {
++        if (sponsorSegments.isEmpty() || exoPlayerIsNull()) {
++            return;
++        }
++        final long position = simpleExoPlayer.getCurrentPosition();
++        for (final long[] segment : sponsorSegments) {
++            if (position >= segment[0] && position < segment[1] - 500) {
++                simpleExoPlayer.seekTo(segment[1]);
++                Toast.makeText(context, R.string.custom_sponsorblock_skipped,
++                        Toast.LENGTH_SHORT).show();
++                return;
++            }
++        }
++    }
++
+     private Disposable getProgressUpdateDisposable() {
+         return Observable.interval(PROGRESS_LOOP_INTERVAL_MILLIS, MILLISECONDS,
+                         AndroidSchedulers.mainThread())
+@@ -1392,6 +1432,7 @@ public final class Player implements PlaybackListener, Listener {
+                 if (previousInfo == null || !previousInfo.getUrl().equals(info.getUrl())) {
+                     // only update with the new stream info if it has actually changed
+                     updateMetadataWith(info);
++                    loadSponsorSegments(info);
+                 } else if (previousAudioTrack == null
+                         || tag.getMaybeAudioTrack()
+                         .map(t -> t.getSelectedAudioStreamIndex()
+diff --git a/app/src/main/res/drawable/custom_launcher_foreground.xml b/app/src/main/res/drawable/custom_launcher_foreground.xml
+new file mode 100644
+index 0000000..e050f3b
+--- /dev/null
++++ b/app/src/main/res/drawable/custom_launcher_foreground.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="108dp"
++    android:height="108dp"
++    android:viewportWidth="108"
++    android:viewportHeight="108">
++    <path
++        android:pathData="M54,31 a23,23 0 1,1 0,46 a23,23 0 1,1 0,-46"
++        android:strokeWidth="6"
++        android:strokeColor="#FF7A59"
++        android:fillColor="#00000000" />
++    <path
++        android:pathData="M77,54 a23,23 0 0,1 -11.5,19.9"
++        android:strokeWidth="6"
++        android:strokeLineCap="round"
++        android:strokeColor="#FFC44D"
++        android:fillColor="#00000000" />
++    <path
++        android:pathData="M49,44 L65,54 L49,64 Z"
++        android:strokeWidth="4"
++        android:strokeLineJoin="round"
++        android:strokeColor="#FFFFFF"
++        android:fillColor="#FFFFFF" />
++</vector>
 diff --git a/app/src/main/res/drawable/yt_duration_badge.xml b/app/src/main/res/drawable/yt_duration_badge.xml
 new file mode 100644
 index 0000000..3bb3822
@@ -110,8 +544,30 @@ index 0000000..3bb3822
 +    <solid android:color="@color/duration_background_color" />
 +    <corners android:radius="4dp" />
 +</shape>
+diff --git a/app/src/main/res/drawable/yt_live_duration_badge.xml b/app/src/main/res/drawable/yt_live_duration_badge.xml
+new file mode 100644
+index 0000000..66a86e3
+--- /dev/null
++++ b/app/src/main/res/drawable/yt_live_duration_badge.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="@color/live_duration_background_color" />
++    <corners android:radius="4dp" />
++</shape>
+diff --git a/app/src/main/res/drawable/yt_pill_button.xml b/app/src/main/res/drawable/yt_pill_button.xml
+new file mode 100644
+index 0000000..c923bb4
+--- /dev/null
++++ b/app/src/main/res/drawable/yt_pill_button.xml
+@@ -0,0 +1,5 @@
++<?xml version="1.0" encoding="utf-8"?>
++<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
++    <solid android:color="#FFFFFF" />
++    <corners android:radius="18dp" />
++</shape>
 diff --git a/app/src/main/res/layout-land/list_stream_card_item.xml b/app/src/main/res/layout-land/list_stream_card_item.xml
-index 7939425..efef587 100644
+index 7939425..5806869 100644
 --- a/app/src/main/res/layout-land/list_stream_card_item.xml
 +++ b/app/src/main/res/layout-land/list_stream_card_item.xml
 @@ -10,8 +10,9 @@
@@ -134,8 +590,36 @@ index 7939425..efef587 100644
          android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
          android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
          android:textAllCaps="true"
+@@ -39,6 +40,7 @@
+ 
+     <org.schabi.newpipe.views.NewPipeTextView
+         android:id="@+id/itemVideoTitleView"
++        android:fontFamily="sans-serif-medium"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+         android:layout_marginStart="@dimen/video_item_search_image_right_margin"
+diff --git a/app/src/main/res/layout/fragment_channel.xml b/app/src/main/res/layout/fragment_channel.xml
+index f557e33..3a0d863 100644
+--- a/app/src/main/res/layout/fragment_channel.xml
++++ b/app/src/main/res/layout/fragment_channel.xml
+@@ -125,7 +125,14 @@
+                 <androidx.appcompat.widget.AppCompatButton
+                     android:id="@+id/channel_subscribe_button"
+                     android:layout_width="wrap_content"
+-                    android:layout_height="wrap_content"
++                    android:layout_height="36dp"
++                    android:layout_marginEnd="12dp"
++                    android:background="@drawable/yt_pill_button"
++                    android:minWidth="0dp"
++                    android:minHeight="0dp"
++                    android:paddingHorizontal="16dp"
++                    android:fontFamily="sans-serif-medium"
++                    android:textAllCaps="false"
+                     android:text="@string/subscribe_button_title"
+                     android:textSize="@dimen/channel_rss_title_size"
+                     app:layout_constraintBottom_toBottomOf="parent"
 diff --git a/app/src/main/res/layout/list_stream_card_item.xml b/app/src/main/res/layout/list_stream_card_item.xml
-index 968dca0..288cbe0 100644
+index 968dca0..b416b48 100644
 --- a/app/src/main/res/layout/list_stream_card_item.xml
 +++ b/app/src/main/res/layout/list_stream_card_item.xml
 @@ -6,17 +6,18 @@
@@ -170,6 +654,224 @@ index 968dca0..288cbe0 100644
          android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
          android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
          android:textAllCaps="true"
+@@ -42,18 +43,33 @@
+         app:layout_constraintRight_toRightOf="@id/itemThumbnailView"
+         tools:text="1:09:10" />
+ 
++    <com.google.android.material.imageview.ShapeableImageView
++        android:id="@+id/itemUploaderAvatarView"
++        android:layout_width="36dp"
++        android:layout_height="36dp"
++        android:layout_marginTop="12dp"
++        android:scaleType="centerCrop"
++        android:src="@drawable/placeholder_person"
++        android:visibility="gone"
++        app:shapeAppearance="@style/CircularImageView"
++        app:layout_constraintStart_toStartOf="@id/itemThumbnailView"
++        app:layout_constraintTop_toBottomOf="@id/itemThumbnailView"
++        tools:visibility="visible" />
++
+     <org.schabi.newpipe.views.NewPipeTextView
+         android:id="@+id/itemVideoTitleView"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+-        android:layout_marginStart="@dimen/margin_small"
+-        android:layout_marginEnd="@dimen/margin_small"
++        android:layout_marginStart="12dp"
++        android:layout_marginEnd="4dp"
+         android:ellipsize="end"
+         android:maxLines="2"
+-        android:layout_marginTop="@dimen/margin_small"
++        android:layout_marginTop="12dp"
++        android:fontFamily="sans-serif-medium"
+         android:textAppearance="?textAppearanceListItem"
++        app:layout_goneMarginStart="0dp"
+         app:layout_constraintEnd_toEndOf="@id/itemThumbnailView"
+-        app:layout_constraintStart_toStartOf="@id/itemThumbnailView"
++        app:layout_constraintStart_toEndOf="@id/itemUploaderAvatarView"
+         app:layout_constraintTop_toBottomOf="@id/itemThumbnailView"
+         tools:text="Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nunc tristique vitae sem vitae blanditLorem ipsumLorem ipsumLorem ipsumLorem ipsumLorem ipsumLorem ipsumLorem ipsum" />
+ 
+@@ -67,6 +83,7 @@
+         android:lines="1"
+         android:includeFontPadding="false"
+         android:textAppearance="?android:textAppearanceSmall"
++        android:textColor="?android:textColorSecondary"
+         app:layout_constraintEnd_toStartOf="@id/itemAdditionalDetails"
+         app:layout_constraintStart_toStartOf="@id/itemVideoTitleView"
+         app:layout_constraintTop_toBottomOf="@+id/itemVideoTitleView"
+@@ -76,6 +93,7 @@
+         android:id="@+id/itemAdditionalDetails"
+         android:layout_width="wrap_content"
+         android:layout_height="wrap_content"
++        android:textColor="?android:textColorSecondary"
+         android:ellipsize="end"
+         android:lines="1"
+         android:includeFontPadding="false"
+diff --git a/app/src/main/res/layout/list_stream_grid_item.xml b/app/src/main/res/layout/list_stream_grid_item.xml
+index 9d5636f..99ca38f 100644
+--- a/app/src/main/res/layout/list_stream_grid_item.xml
++++ b/app/src/main/res/layout/list_stream_grid_item.xml
+@@ -10,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="@dimen/video_item_grid_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_grid_thumbnail_image_height"
+         android:scaleType="fitCenter"
+@@ -26,7 +27,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+@@ -41,6 +42,7 @@
+ 
+     <org.schabi.newpipe.views.NewPipeTextView
+         android:id="@+id/itemVideoTitleView"
++        android:fontFamily="sans-serif-medium"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+         android:ellipsize="end"
+diff --git a/app/src/main/res/layout/list_stream_item.xml b/app/src/main/res/layout/list_stream_item.xml
+index 7939425..7f3adc8 100644
+--- a/app/src/main/res/layout/list_stream_item.xml
++++ b/app/src/main/res/layout/list_stream_item.xml
+@@ -10,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnailSmall"
+         android:layout_width="@dimen/video_item_search_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_search_thumbnail_image_height"
+         android:scaleType="fitCenter"
+@@ -26,7 +27,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
+         android:textAllCaps="true"
+@@ -39,6 +40,7 @@
+ 
+     <org.schabi.newpipe.views.NewPipeTextView
+         android:id="@+id/itemVideoTitleView"
++        android:fontFamily="sans-serif-medium"
+         android:layout_width="0dp"
+         android:layout_height="wrap_content"
+         android:layout_marginStart="@dimen/video_item_search_image_right_margin"
+diff --git a/app/src/main/res/layout/list_stream_playlist_card_item.xml b/app/src/main/res/layout/list_stream_playlist_card_item.xml
+index 581a9d7..6f90b93 100644
+--- a/app/src/main/res/layout/list_stream_playlist_card_item.xml
++++ b/app/src/main/res/layout/list_stream_playlist_card_item.xml
+@@ -11,8 +11,9 @@
+     android:clickable="true"
+     android:focusable="true">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="0dp"
+         android:layout_height="0dp"
+         android:scaleType="centerCrop"
+@@ -29,7 +30,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/spacing_nano"
+         android:layout_marginBottom="@dimen/spacing_nano"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/layout/list_stream_playlist_grid_item.xml b/app/src/main/res/layout/list_stream_playlist_grid_item.xml
+index 601ca58..db143dc 100644
+--- a/app/src/main/res/layout/list_stream_playlist_grid_item.xml
++++ b/app/src/main/res/layout/list_stream_playlist_grid_item.xml
+@@ -1,5 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
+     xmlns:tools="http://schemas.android.com/tools"
+     android:id="@+id/itemRoot"
+     android:layout_width="match_parent"
+@@ -9,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="@dimen/video_item_grid_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_grid_thumbnail_image_height"
+         android:layout_alignParentTop="true"
+@@ -28,7 +30,7 @@
+         android:layout_alignBottom="@id/itemThumbnailView"
+         android:layout_marginRight="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/layout/list_stream_playlist_item.xml b/app/src/main/res/layout/list_stream_playlist_item.xml
+index 0beee54..959f653 100644
+--- a/app/src/main/res/layout/list_stream_playlist_item.xml
++++ b/app/src/main/res/layout/list_stream_playlist_item.xml
+@@ -1,5 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
+     xmlns:tools="http://schemas.android.com/tools"
+     android:id="@+id/itemRoot"
+     android:layout_width="match_parent"
+@@ -9,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnailSmall"
+         android:layout_width="98dp"
+         android:layout_height="55dp"
+         android:layout_alignParentStart="true"
+@@ -29,7 +31,7 @@
+         android:layout_alignBottom="@id/itemThumbnailView"
+         android:layout_marginRight="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml b/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+index 6f37998..8819924 100644
+--- a/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
++++ b/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+-    <background android:drawable="@color/ic_launcher_background" />
+-    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+-    <monochrome android:drawable="@mipmap/ic_launcher_foreground" />
++    <background android:drawable="@color/custom_launcher_background" />
++    <foreground android:drawable="@drawable/custom_launcher_foreground" />
++    <monochrome android:drawable="@drawable/custom_launcher_foreground" />
+ </adaptive-icon>
 diff --git a/app/src/main/res/values/colors.xml b/app/src/main/res/values/colors.xml
 index 73e8a0c..e5d9b46 100644
 --- a/app/src/main/res/values/colors.xml
@@ -261,6 +963,21 @@ index 60ac20d..60685c9 100644
  
      <!-- TODO: Use these across the app instead of hardcoding it -->
      <string name="list_view_mode_auto_key">auto</string>
+diff --git a/app/src/main/res/values/strings_custom.xml b/app/src/main/res/values/strings_custom.xml
+new file mode 100644
+index 0000000..5ef0f46
+--- /dev/null
++++ b/app/src/main/res/values/strings_custom.xml
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="utf-8"?>
++<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
++    <string name="custom_extras_category">Extras (NewPipe Custom)</string>
++    <string name="custom_sponsorblock_title">SponsorBlock</string>
++    <string name="custom_sponsorblock_summary">Saltar patrocinios, autopromoción y recordatorios de suscripción</string>
++    <string name="custom_sponsorblock_skipped">Patrocinio omitido</string>
++    <string name="custom_ryd_title">Return YouTube Dislike</string>
++    <string name="custom_ryd_summary">Mostrar el número de "no me gusta" (estimado)</string>
++</resources>
 diff --git a/app/src/main/res/values/styles_services.xml b/app/src/main/res/values/styles_services.xml
 index db1fba3..f1513b8 100644
 --- a/app/src/main/res/values/styles_services.xml
@@ -285,17 +1002,26 @@ index db1fba3..f1513b8 100644
      <!-- SoundCloud -->
 diff --git a/app/src/main/res/values/styles_yt.xml b/app/src/main/res/values/styles_yt.xml
 new file mode 100644
-index 0000000..31345f3
+index 0000000..c566dc5
 --- /dev/null
 +++ b/app/src/main/res/values/styles_yt.xml
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,18 @@
 +<?xml version="1.0" encoding="utf-8"?>
 +<resources>
++    <color name="yt_subscribe_background_color">#F1F1F1</color>
++    <color name="yt_subscribe_text_color">#0F0F0F</color>
++    <color name="yt_subscribed_background_color">#3A3A3A</color>
++    <color name="yt_subscribed_text_color">#F1F1F1</color>
++    <color name="custom_launcher_background">#16162A</color>
 +    <color name="yt_dark_toolbar_color">#0F0F0F</color>
 +
 +    <style name="YtRoundedThumbnail">
 +        <item name="cornerFamily">rounded</item>
 +        <item name="cornerSize">12dp</item>
++    </style>
++    <style name="YtRoundedThumbnailSmall">
++        <item name="cornerFamily">rounded</item>
++        <item name="cornerSize">8dp</item>
 +    </style>
 +</resources>
 diff --git a/app/src/main/res/xml/appearance_settings.xml b/app/src/main/res/xml/appearance_settings.xml
@@ -311,6 +1037,37 @@ index d8f6bf5..7d32232 100644
          android:key="@string/main_tabs_position_key"
          android:summary="@string/main_tabs_position_summary"
          android:title="@string/main_tabs_position_title"
+diff --git a/app/src/main/res/xml/video_audio_settings.xml b/app/src/main/res/xml/video_audio_settings.xml
+index 6e8e297..fa531e2 100644
+--- a/app/src/main/res/xml/video_audio_settings.xml
++++ b/app/src/main/res/xml/video_audio_settings.xml
+@@ -250,4 +250,26 @@
+             app:singleLineTitle="false"
+             app:iconSpaceReserved="false" />
+     </PreferenceCategory>
++
++    <PreferenceCategory
++        android:layout="@layout/settings_category_header_layout"
++        android:title="@string/custom_extras_category"
++        app:iconSpaceReserved="false">
++
++        <SwitchPreferenceCompat
++            android:defaultValue="true"
++            android:key="custom_sponsorblock"
++            android:summary="@string/custom_sponsorblock_summary"
++            android:title="@string/custom_sponsorblock_title"
++            app:singleLineTitle="false"
++            app:iconSpaceReserved="false" />
++
++        <SwitchPreferenceCompat
++            android:defaultValue="true"
++            android:key="custom_return_dislike"
++            android:summary="@string/custom_ryd_summary"
++            android:title="@string/custom_ryd_title"
++            app:singleLineTitle="false"
++            app:iconSpaceReserved="false" />
++    </PreferenceCategory>
+ </PreferenceScreen>
 diff --git a/signing/debug.keystore b/signing/debug.keystore
 new file mode 100644
 index 0000000000000000000000000000000000000000..c8c59c500232babcee63048b4e7152aea149221e
@@ -369,172 +1126,4 @@ tq(qFkVHzn2pBZ27QREvBMUHG@+@o_)W>P=*8y3k2jM7h(O#T%S{{*sbzMlX9
 
 literal 0
 HcmV?d00001
-
--- 
-2.43.0
-
-
-From ea98a2d5b9172bcbc5bcc45e983b57c099fed9e9 Mon Sep 17 00:00:00 2001
-From: Custom <custom@local>
-Date: Wed, 28 Oct 2026 17:33:02 +0000
-Subject: [PATCH 2/2] Rounded thumbnails in all video lists
-
----
- app/src/main/res/layout/list_stream_grid_item.xml          | 5 +++--
- app/src/main/res/layout/list_stream_item.xml               | 5 +++--
- app/src/main/res/layout/list_stream_playlist_card_item.xml | 5 +++--
- app/src/main/res/layout/list_stream_playlist_grid_item.xml | 6 ++++--
- app/src/main/res/layout/list_stream_playlist_item.xml      | 6 ++++--
- app/src/main/res/values/styles_yt.xml                      | 4 ++++
- 6 files changed, 21 insertions(+), 10 deletions(-)
-
-diff --git a/app/src/main/res/layout/list_stream_grid_item.xml b/app/src/main/res/layout/list_stream_grid_item.xml
-index 9d5636f..2d50b0f 100644
---- a/app/src/main/res/layout/list_stream_grid_item.xml
-+++ b/app/src/main/res/layout/list_stream_grid_item.xml
-@@ -10,8 +10,9 @@
-     android:focusable="true"
-     android:padding="@dimen/video_item_search_padding">
- 
--    <ImageView
-+    <com.google.android.material.imageview.ShapeableImageView
-         android:id="@+id/itemThumbnailView"
-+        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
-         android:layout_width="@dimen/video_item_grid_thumbnail_image_width"
-         android:layout_height="@dimen/video_item_grid_thumbnail_image_height"
-         android:scaleType="fitCenter"
-@@ -26,7 +27,7 @@
-         android:layout_height="wrap_content"
-         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
-         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
--        android:background="@color/duration_background_color"
-+        android:background="@drawable/yt_duration_badge"
-         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
-         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
-         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
-diff --git a/app/src/main/res/layout/list_stream_item.xml b/app/src/main/res/layout/list_stream_item.xml
-index 7939425..983b142 100644
---- a/app/src/main/res/layout/list_stream_item.xml
-+++ b/app/src/main/res/layout/list_stream_item.xml
-@@ -10,8 +10,9 @@
-     android:focusable="true"
-     android:padding="@dimen/video_item_search_padding">
- 
--    <ImageView
-+    <com.google.android.material.imageview.ShapeableImageView
-         android:id="@+id/itemThumbnailView"
-+        app:shapeAppearanceOverlay="@style/YtRoundedThumbnailSmall"
-         android:layout_width="@dimen/video_item_search_thumbnail_image_width"
-         android:layout_height="@dimen/video_item_search_thumbnail_image_height"
-         android:scaleType="fitCenter"
-@@ -26,7 +27,7 @@
-         android:layout_height="wrap_content"
-         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
-         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
--        android:background="@color/duration_background_color"
-+        android:background="@drawable/yt_duration_badge"
-         android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
-         android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
-         android:textAllCaps="true"
-diff --git a/app/src/main/res/layout/list_stream_playlist_card_item.xml b/app/src/main/res/layout/list_stream_playlist_card_item.xml
-index 581a9d7..6f90b93 100644
---- a/app/src/main/res/layout/list_stream_playlist_card_item.xml
-+++ b/app/src/main/res/layout/list_stream_playlist_card_item.xml
-@@ -11,8 +11,9 @@
-     android:clickable="true"
-     android:focusable="true">
- 
--    <ImageView
-+    <com.google.android.material.imageview.ShapeableImageView
-         android:id="@+id/itemThumbnailView"
-+        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
-         android:layout_width="0dp"
-         android:layout_height="0dp"
-         android:scaleType="centerCrop"
-@@ -29,7 +30,7 @@
-         android:layout_height="wrap_content"
-         android:layout_marginEnd="@dimen/spacing_nano"
-         android:layout_marginBottom="@dimen/spacing_nano"
--        android:background="@color/duration_background_color"
-+        android:background="@drawable/yt_duration_badge"
-         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
-         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
-         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
-diff --git a/app/src/main/res/layout/list_stream_playlist_grid_item.xml b/app/src/main/res/layout/list_stream_playlist_grid_item.xml
-index 601ca58..db143dc 100644
---- a/app/src/main/res/layout/list_stream_playlist_grid_item.xml
-+++ b/app/src/main/res/layout/list_stream_playlist_grid_item.xml
-@@ -1,5 +1,6 @@
- <?xml version="1.0" encoding="utf-8"?>
- <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
-+    xmlns:app="http://schemas.android.com/apk/res-auto"
-     xmlns:tools="http://schemas.android.com/tools"
-     android:id="@+id/itemRoot"
-     android:layout_width="match_parent"
-@@ -9,8 +10,9 @@
-     android:focusable="true"
-     android:padding="@dimen/video_item_search_padding">
- 
--    <ImageView
-+    <com.google.android.material.imageview.ShapeableImageView
-         android:id="@+id/itemThumbnailView"
-+        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
-         android:layout_width="@dimen/video_item_grid_thumbnail_image_width"
-         android:layout_height="@dimen/video_item_grid_thumbnail_image_height"
-         android:layout_alignParentTop="true"
-@@ -28,7 +30,7 @@
-         android:layout_alignBottom="@id/itemThumbnailView"
-         android:layout_marginRight="@dimen/video_item_search_duration_margin"
-         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
--        android:background="@color/duration_background_color"
-+        android:background="@drawable/yt_duration_badge"
-         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
-         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
-         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
-diff --git a/app/src/main/res/layout/list_stream_playlist_item.xml b/app/src/main/res/layout/list_stream_playlist_item.xml
-index 0beee54..959f653 100644
---- a/app/src/main/res/layout/list_stream_playlist_item.xml
-+++ b/app/src/main/res/layout/list_stream_playlist_item.xml
-@@ -1,5 +1,6 @@
- <?xml version="1.0" encoding="utf-8"?>
- <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
-+    xmlns:app="http://schemas.android.com/apk/res-auto"
-     xmlns:tools="http://schemas.android.com/tools"
-     android:id="@+id/itemRoot"
-     android:layout_width="match_parent"
-@@ -9,8 +10,9 @@
-     android:focusable="true"
-     android:padding="@dimen/video_item_search_padding">
- 
--    <ImageView
-+    <com.google.android.material.imageview.ShapeableImageView
-         android:id="@+id/itemThumbnailView"
-+        app:shapeAppearanceOverlay="@style/YtRoundedThumbnailSmall"
-         android:layout_width="98dp"
-         android:layout_height="55dp"
-         android:layout_alignParentStart="true"
-@@ -29,7 +31,7 @@
-         android:layout_alignBottom="@id/itemThumbnailView"
-         android:layout_marginRight="@dimen/video_item_search_duration_margin"
-         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
--        android:background="@color/duration_background_color"
-+        android:background="@drawable/yt_duration_badge"
-         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
-         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
-         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
-diff --git a/app/src/main/res/values/styles_yt.xml b/app/src/main/res/values/styles_yt.xml
-index 31345f3..7b53a7a 100644
---- a/app/src/main/res/values/styles_yt.xml
-+++ b/app/src/main/res/values/styles_yt.xml
-@@ -6,4 +6,8 @@
-         <item name="cornerFamily">rounded</item>
-         <item name="cornerSize">12dp</item>
-     </style>
-+    <style name="YtRoundedThumbnailSmall">
-+        <item name="cornerFamily">rounded</item>
-+        <item name="cornerSize">8dp</item>
-+    </style>
- </resources>
--- 
-2.43.0
 
