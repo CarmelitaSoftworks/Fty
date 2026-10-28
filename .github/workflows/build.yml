@@ -1,0 +1,35 @@
+name: "Build NewPipe Custom"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Get the patch from this repo"
+        uses: actions/checkout@v6
+
+      - name: "Download NewPipe v0.29.1 and apply the patch"
+        run: |
+          git clone --depth 1 --branch v0.29.1 https://github.com/TeamNewPipe/NewPipe.git np
+          cd np
+          git switch -c master
+          git apply --binary ../newpipe-custom.patch
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: "Build APK"
+        working-directory: np
+        run: ./gradlew assembleContinuous --stacktrace
+
+      - name: "Upload APK"
+        uses: actions/upload-artifact@v7
+        with:
+          name: NewPipe-Custom
+          path: np/app/build/outputs/apk/continuous/*.apk
