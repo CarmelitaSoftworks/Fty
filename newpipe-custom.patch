@@ -1,7 +1,7 @@
 From 40c565705df09b78b8425e24b20b2729d27ecdf6 Mon Sep 17 00:00:00 2001
 From: Custom <custom@local>
 Date: Wed, 28 Oct 2026 17:07:57 +0000
-Subject: [PATCH] YouTube-style look: dark #0F0F0F theme, card feed, bottom
+Subject: [PATCH 1/2] YouTube-style look: dark #0F0F0F theme, card feed, bottom
  tabs, rounded thumbnails, custom build workflow
 
 ---
@@ -370,6 +370,171 @@ tq(qFkVHzn2pBZ27QREvBMUHG@+@o_)W>P=*8y3k2jM7h(O#T%S{{*sbzMlX9
 literal 0
 HcmV?d00001
 
+-- 
+2.43.0
+
+
+From ea98a2d5b9172bcbc5bcc45e983b57c099fed9e9 Mon Sep 17 00:00:00 2001
+From: Custom <custom@local>
+Date: Wed, 28 Oct 2026 17:33:02 +0000
+Subject: [PATCH 2/2] Rounded thumbnails in all video lists
+
+---
+ app/src/main/res/layout/list_stream_grid_item.xml          | 5 +++--
+ app/src/main/res/layout/list_stream_item.xml               | 5 +++--
+ app/src/main/res/layout/list_stream_playlist_card_item.xml | 5 +++--
+ app/src/main/res/layout/list_stream_playlist_grid_item.xml | 6 ++++--
+ app/src/main/res/layout/list_stream_playlist_item.xml      | 6 ++++--
+ app/src/main/res/values/styles_yt.xml                      | 4 ++++
+ 6 files changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/app/src/main/res/layout/list_stream_grid_item.xml b/app/src/main/res/layout/list_stream_grid_item.xml
+index 9d5636f..2d50b0f 100644
+--- a/app/src/main/res/layout/list_stream_grid_item.xml
++++ b/app/src/main/res/layout/list_stream_grid_item.xml
+@@ -10,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="@dimen/video_item_grid_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_grid_thumbnail_image_height"
+         android:scaleType="fitCenter"
+@@ -26,7 +27,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/layout/list_stream_item.xml b/app/src/main/res/layout/list_stream_item.xml
+index 7939425..983b142 100644
+--- a/app/src/main/res/layout/list_stream_item.xml
++++ b/app/src/main/res/layout/list_stream_item.xml
+@@ -10,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnailSmall"
+         android:layout_width="@dimen/video_item_search_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_search_thumbnail_image_height"
+         android:scaleType="fitCenter"
+@@ -26,7 +27,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingHorizontal="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingVertical="@dimen/video_item_search_duration_vertical_padding"
+         android:textAllCaps="true"
+diff --git a/app/src/main/res/layout/list_stream_playlist_card_item.xml b/app/src/main/res/layout/list_stream_playlist_card_item.xml
+index 581a9d7..6f90b93 100644
+--- a/app/src/main/res/layout/list_stream_playlist_card_item.xml
++++ b/app/src/main/res/layout/list_stream_playlist_card_item.xml
+@@ -11,8 +11,9 @@
+     android:clickable="true"
+     android:focusable="true">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="0dp"
+         android:layout_height="0dp"
+         android:scaleType="centerCrop"
+@@ -29,7 +30,7 @@
+         android:layout_height="wrap_content"
+         android:layout_marginEnd="@dimen/spacing_nano"
+         android:layout_marginBottom="@dimen/spacing_nano"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/layout/list_stream_playlist_grid_item.xml b/app/src/main/res/layout/list_stream_playlist_grid_item.xml
+index 601ca58..db143dc 100644
+--- a/app/src/main/res/layout/list_stream_playlist_grid_item.xml
++++ b/app/src/main/res/layout/list_stream_playlist_grid_item.xml
+@@ -1,5 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
+     xmlns:tools="http://schemas.android.com/tools"
+     android:id="@+id/itemRoot"
+     android:layout_width="match_parent"
+@@ -9,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnail"
+         android:layout_width="@dimen/video_item_grid_thumbnail_image_width"
+         android:layout_height="@dimen/video_item_grid_thumbnail_image_height"
+         android:layout_alignParentTop="true"
+@@ -28,7 +30,7 @@
+         android:layout_alignBottom="@id/itemThumbnailView"
+         android:layout_marginRight="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/layout/list_stream_playlist_item.xml b/app/src/main/res/layout/list_stream_playlist_item.xml
+index 0beee54..959f653 100644
+--- a/app/src/main/res/layout/list_stream_playlist_item.xml
++++ b/app/src/main/res/layout/list_stream_playlist_item.xml
+@@ -1,5 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:app="http://schemas.android.com/apk/res-auto"
+     xmlns:tools="http://schemas.android.com/tools"
+     android:id="@+id/itemRoot"
+     android:layout_width="match_parent"
+@@ -9,8 +10,9 @@
+     android:focusable="true"
+     android:padding="@dimen/video_item_search_padding">
+ 
+-    <ImageView
++    <com.google.android.material.imageview.ShapeableImageView
+         android:id="@+id/itemThumbnailView"
++        app:shapeAppearanceOverlay="@style/YtRoundedThumbnailSmall"
+         android:layout_width="98dp"
+         android:layout_height="55dp"
+         android:layout_alignParentStart="true"
+@@ -29,7 +31,7 @@
+         android:layout_alignBottom="@id/itemThumbnailView"
+         android:layout_marginRight="@dimen/video_item_search_duration_margin"
+         android:layout_marginBottom="@dimen/video_item_search_duration_margin"
+-        android:background="@color/duration_background_color"
++        android:background="@drawable/yt_duration_badge"
+         android:paddingLeft="@dimen/video_item_search_duration_horizontal_padding"
+         android:paddingTop="@dimen/video_item_search_duration_vertical_padding"
+         android:paddingRight="@dimen/video_item_search_duration_horizontal_padding"
+diff --git a/app/src/main/res/values/styles_yt.xml b/app/src/main/res/values/styles_yt.xml
+index 31345f3..7b53a7a 100644
+--- a/app/src/main/res/values/styles_yt.xml
++++ b/app/src/main/res/values/styles_yt.xml
+@@ -6,4 +6,8 @@
+         <item name="cornerFamily">rounded</item>
+         <item name="cornerSize">12dp</item>
+     </style>
++    <style name="YtRoundedThumbnailSmall">
++        <item name="cornerFamily">rounded</item>
++        <item name="cornerSize">8dp</item>
++    </style>
+ </resources>
 -- 
 2.43.0
 
